@@ -73,6 +73,7 @@
     <ClCompile Include="src\Main.cpp" />
     <ClCompile Include="src\Config.cpp" />
     <ClCompile Include="src\ExtraHouses.cpp" />
+    <ClCompile Include="src\Instrumentation.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\MegaSkirmish.h" />
