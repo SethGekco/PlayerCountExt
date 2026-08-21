@@ -15,6 +15,7 @@
 */
 
 #include "MegaSkirmish.h"
+#include "GameConstruct.h"
 
 #include <Syringe.h>
 #include <Helpers/Macro.h>
@@ -31,25 +32,11 @@
 #include <CellClass.h>
 
 #include <algorithm>
-#include <new>
 
-namespace
-{
-	// GameCreate<T> is concept-gated on std::constructible_from, which is
-	// always false for the engine's abstract classes (HouseClass, UnitClass
-	// inherit pure-virtual IPersist methods from AbstractClass). They're only
-	// concrete at runtime via the real vtable. So we allocate through the
-	// game's allocator and placement-new with the real (address-jumping)
-	// constructor, exactly what the engine itself does internally.
-	template <typename T, typename... TArgs>
-	T* GameSpawn(TArgs&&... args)
-	{
-		void* pMem = YRMemory::Allocate(sizeof(T));
-		if (!pMem)
-			return nullptr;
-		return new (pMem) T(std::forward<TArgs>(args)...);
-	}
-}
+// Construction of the compiler-abstract engine types lives in GameConstruct.h.
+// The previous GameSpawn<T> here used placement-new, which does NOT work:
+// the abstract-class check fires on the construction, not the allocation.
+// See GameConstruct.h for the full explanation and the verified addresses.
 
 namespace
 {
@@ -76,7 +63,7 @@ namespace
 
 		// Engine HouseClass ctor (0x4F54A0). Expected to register into
 		// HouseClass::Array and assign ArrayIndex — verify via the log line.
-		const auto pHouse = GameSpawn<HouseClass>(pCountry);
+		const auto pHouse = MegaSkirmish::Engine::CreateHouse(pCountry);
 		if (!pHouse)
 		{
 			MegaSkirmish::Log("[MegaSkirmish] House%d: creation failed.\n", idx);
@@ -128,7 +115,9 @@ namespace
 		CellStruct base = ScenarioClass::Instance->GetWaypointCoords(waypoint);
 		const short off = static_cast<short>((idx + 1) * 4); // spread so MCVs don't stack
 
-		const auto pUnit = GameSpawn<UnitClass>(pMCV, pHouse);
+		// Virtual dispatch through the real vtable — see the R0 footgun note
+		// in GameConstruct.h. Creates the unit in limbo; Unlimbo() places it.
+		const auto pUnit = MegaSkirmish::Engine::CreateUnit(pMCV, pHouse);
 		if (!pUnit)
 			return false;
 
