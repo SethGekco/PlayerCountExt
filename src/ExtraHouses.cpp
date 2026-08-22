@@ -183,8 +183,28 @@ void MegaSkirmish::CreateExtraHouses()
 }
 
 // ---------------------------------------------------------------------------
-// The trigger hook.
+// The trigger hook — COMPILE-TIME DISABLED for the instrumentation runs.
 //
+// Set to 1 only when deliberately testing the (abandoned) bolt-on path.
+//
+// WHY THIS MUST BE A COMPILE-TIME GATE, NOT A RUNTIME `if`:
+// DEFINE_HOOK emits data that Syringe reads at load time to patch a JMP into
+// the target address. That patch happens whether or not the hook body decides
+// to do anything, so a runtime guard would NOT protect us — the address would
+// still be overwritten. 0x6878E0 is an unverified guess (see below); patching
+// a JMP into the middle of an unrelated instruction corrupts code and can
+// crash arbitrarily far from the patch site. The only way to make it harmless
+// is for the hook to not exist in the binary at all.
+//
+// Keeping it out also keeps the instrumentation result clean: any crash is
+// then attributable to the two disassembly-verified hooks in
+// Instrumentation.cpp (0x687F10 / 0x688378) rather than to this guess, and the
+// house array my exit hook reports is not mutated afterwards by this path.
+// ---------------------------------------------------------------------------
+#define MEGASKIRMISH_ENABLE_BOLTON_HOUSES 0
+
+#if MEGASKIRMISH_ENABLE_BOLTON_HOUSES
+
 // VERIFY: 0x6878E0 is inside Westwood's scenario-start path, reached once
 // after houses and the human's initial units are placed. This is the prime
 // candidate for "everything exists, game hasn't started ticking yet."
@@ -194,7 +214,6 @@ void MegaSkirmish::CreateExtraHouses()
 //   2. first logic frame  (LogicClass update / 0x55D360 MainLoop entry, guarded)
 //   3. immediately after the stock spawner's AssignHooks return
 // The one-shot guard means wherever it lands, it runs exactly once.
-// ---------------------------------------------------------------------------
 DEFINE_HOOK(0x6878E0, MegaSkirmish_CreateHouses, 0x6)
 {
 	if (MegaSkirmish::Enabled && !MegaSkirmish::HousesCreated)
@@ -206,3 +225,5 @@ DEFINE_HOOK(0x6878E0, MegaSkirmish_CreateHouses, 0x6)
 
 	return 0; // continue original code
 }
+
+#endif // MEGASKIRMISH_ENABLE_BOLTON_HOUSES
