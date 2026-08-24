@@ -127,6 +127,36 @@ directory. A client-local INI works offline and desyncs online; we do not use
 one. `spawn.ini` already carries `[Other1]..[OtherN]` and `Multi1..MultiN` with
 no hardcoded limit in the client's writer.
 
+**The mapping is `AISlots[i] <-> Multi(i+1)`** (MultiN is 1-based), with
+human-owned slots left at `-1`:
+
+| `spawn.ini` | Engine |
+|---|---|
+| `[HouseCountries] MultiN` | `Countries[8]` `0xA8B29C` |
+| `[HouseColors] MultiN` | `Colors[8]` `0xA8B2BC` |
+| `[HouseHandicaps] MultiN` | `Difficulties[8]` `0xA8B27C` |
+| `[SpawnLocations] MultiN` | `Starts[8]` `0xA8B2DC` |
+| `[Settings] AIPlayers` | `0xA8B274` |
+
+**RUNTIME-CONFIRMED** across two live skirmishes with different countries and
+seeds — every populated slot agreed on both country and colour, zero mismatches.
+Conveniently the engine's empty-slot sentinel is also `-1`, so "key absent -> -1"
+round-trips against its own convention.
+
+Two Win32 INI footguns handled in `SpawnConfig.cpp`:
+- `GetPrivateProfile*` resolves a **bare** filename against the *Windows*
+  directory, not the cwd — hence `.\spawn.ini`, or every read silently returns
+  its default. *(Proven: the parser finds the file.)*
+- `GetPrivateProfileInt` parses as **unsigned** and returns 0 for negatives.
+  `-1` would become `0`, a valid country index. We `strtol` the raw string.
+  *(Defensive only — observed `spawn.ini` files contain no literal negatives, so
+  this path is not yet exercised; the `-1`s in logs come from absent keys.)*
+
+**`AIPlayers` is not clamped by the client** — `GameLobbyBase.cs` writes
+`settings.SetIntValue("AIPlayers", AIPlayers.Count)`, a raw count. So raising the
+client's `MAX_PLAYER_COUNT` is sufficient to get `AIPlayers > 7` into
+`spawn.ini`; this DLL does **not** need to override `0xA8B274`.
+
 **Approach to the AI cap.** Two known routes:
 
 - **Batch-refill** — at `0x6882C5`, refill the stock 8-wide array with the next

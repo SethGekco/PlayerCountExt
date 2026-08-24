@@ -73,6 +73,7 @@
     <ClCompile Include="src\Main.cpp" />
     <ClCompile Include="src\Instrumentation.cpp" />
     <ClCompile Include="src\SpawnConfig.cpp" />
+    <ClCompile Include="src\AIRefill.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\PlayerCountExt.h" />
