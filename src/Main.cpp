@@ -1,20 +1,22 @@
 /**
-*  MegaSkirmish — standalone Yuri's Revenge companion DLL
+*  PlayerCountExt — standalone Yuri's Revenge DLL for more than 8 houses
 *
-*  Adds extra AI-controlled houses to an offline game so a single human
-*  can play with or against up to 24 AI (or watch 25 AI play among
-*  themselves). Loaded automatically by Syringe alongside the stock
-*  CnCNet spawner / Ares / Phobos — drop the DLL in the game folder,
-*  exactly like Phobos.
+*  The vanilla "8 player" limit is not one constant. It is a scattered set of
+*  fixed-size arrays and loop bounds, sitting under a single real ceiling: the
+*  32-bit per-house bitfield. Every player AND every computer is a HouseClass,
+*  so the limit is on HOUSES, not on "players".
 *
-*  Reads its own config file ("megaskirmish.ini") which the CnCNet client
-*  never touches, so the 8-slot client UI is not a limit.
+*  Drop the DLL in the game folder; Syringe loads it automatically alongside
+*  Antares / Phobos / the stock CnCNet spawner, exactly like Phobos.
 *
-*  Uses YRpp (Phobos-developers) + Syringe (Ares developers). GPLv3.
-*  SCOPE: offline only; no extra HUMAN players (engine net layer caps at 8).
+*  Config comes from spawn.ini — the host-authoritative file the CnCNet client
+*  writes and broadcasts. A client-local config file would desync a networked
+*  game the moment two clients disagreed on the house count. See DESIGN.md.
+*
+*  Uses YRpp (Phobos-developers) + Syringe. GPLv3.
 */
 
-#include "MegaSkirmish.h"
+#include "PlayerCountExt.h"
 
 #include <Syringe.h>
 #include <YRPPCore.h>
@@ -24,25 +26,28 @@
 #include <cstdio>
 #include <cstdarg>
 
-bool MegaSkirmish::Enabled = false;
-bool MegaSkirmish::HousesCreated = false;
+bool PlayerCountExt::Enabled = false;
 
 // ---------------------------------------------------------------------------
 // No host (declhost) declaration is needed: Syringe identifies the target
 // from the hook addresses themselves, exactly like the CnCNet spawner and
 // Phobos, which also omit it. This keeps the DLL loadable across the
-// Ares / CnCNet / Steam gamemd variants.
+// Antares / CnCNet / Steam gamemd variants.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Minimal logger -> megaskirmish.log next to the game exe. Independent of the
+// Minimal logger -> playercountext.log next to the game exe. Independent of the
 // spawner's logger so this DLL has zero link-time dependency on it.
+//
+// Flushes every line on purpose: this DLL's whole job at present is producing
+// evidence about a crashy subsystem, and an unflushed buffer loses exactly the
+// last line you needed.
 // ---------------------------------------------------------------------------
-void MegaSkirmish::Log(const char* format, ...)
+void PlayerCountExt::Log(const char* format, ...)
 {
 	static FILE* pLog = nullptr;
 	if (!pLog)
-		fopen_s(&pLog, "megaskirmish.log", "w");
+		fopen_s(&pLog, "playercountext.log", "w");
 
 	if (!pLog)
 		return;
@@ -63,11 +68,11 @@ bool __stdcall DllMain(HANDLE hInstance, DWORD dwReason, LPVOID /*reserved*/)
 }
 
 // ---------------------------------------------------------------------------
-// Command-line gate. We only activate for an offline spawn (-SPAWN), so we
-// never interfere with the main menu, campaign, or map editor.
-// Hook mirrors the spawner's own command-line parse point (0x52F639).
+// Command-line gate — 0x52F639, named YR_CmdLineParse in the Antares PDB
+// symbol map. Clean 5-byte boundary (xor ebx,ebx + cmp $0x1,%edi); the
+// preceding `mov %ecx,%edi` / `mov %edx,%esi` confirm ESI = argv, EDI = argc.
 // ---------------------------------------------------------------------------
-DEFINE_HOOK(0x52F639, MegaSkirmish_ParseCommandLine, 0x5)
+DEFINE_HOOK(0x52F639, PlayerCountExt_ParseCommandLine, 0x5)
 {
 	GET(char**, ppArgs, ESI);
 	GET(int, nNumArgs, EDI);
@@ -75,11 +80,11 @@ DEFINE_HOOK(0x52F639, MegaSkirmish_ParseCommandLine, 0x5)
 	for (int i = 1; i < nNumArgs; ++i)
 	{
 		if (_stricmp(ppArgs[i], "-SPAWN") == 0)
-			MegaSkirmish::Enabled = true;
+			PlayerCountExt::Enabled = true;
 	}
 
-	if (MegaSkirmish::Enabled)
-		MegaSkirmish::Log("[MegaSkirmish] Armed (offline spawn detected).\n");
+	if (PlayerCountExt::Enabled)
+		PlayerCountExt::Log("[PlayerCountExt] Armed (spawn detected).\n");
 
 	return 0; // continue to original code
 }

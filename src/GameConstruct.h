@@ -1,5 +1,5 @@
 /**
-*  MegaSkirmish — construction of engine classes that are abstract to the compiler
+*  PlayerCountExt — construction of engine classes that are abstract to the compiler
 *
 *  WHY THIS EXISTS
 *  ---------------
@@ -35,7 +35,7 @@
 #include <UnitClass.h>
 #include <UnitTypeClass.h>
 
-namespace MegaSkirmish
+namespace PlayerCountExt
 {
 	namespace Engine
 	{

@@ -1,4 +1,4 @@
-name: Build MegaSkirmish DLL
+name: Build PlayerCountExt DLL
 
 on:
   push:
@@ -25,14 +25,13 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Build (Release | Win32)
-        run: msbuild MegaSkirmish.vcxproj /p:Configuration=Release /p:Platform=Win32 /m
+        run: msbuild PlayerCountExt.vcxproj /p:Configuration=Release /p:Platform=Win32 /m
 
       - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
-          name: MegaSkirmish-dll
+          name: PlayerCountExt-dll
           path: |
-            Release/MegaSkirmish.dll
-            megaskirmish.ini
+            Release/PlayerCountExt.dll
             README.md
           if-no-files-found: error

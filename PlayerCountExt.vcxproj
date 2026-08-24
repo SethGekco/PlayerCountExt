@@ -13,8 +13,8 @@
 
   <PropertyGroup Label="Globals">
     <ProjectGuid>{B1A2C3D4-5E6F-47A8-9B0C-1D2E3F405162}</ProjectGuid>
-    <RootNamespace>MegaSkirmish</RootNamespace>
-    <ProjectName>MegaSkirmish</ProjectName>
+    <RootNamespace>PlayerCountExt</RootNamespace>
+    <ProjectName>PlayerCountExt</ProjectName>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
 
@@ -35,8 +35,8 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)$(Configuration)\obj\</IntDir>
-    <!-- Output name: MegaSkirmish.dll -->
-    <TargetName>MegaSkirmish</TargetName>
+    <!-- Output name: PlayerCountExt.dll -->
+    <TargetName>PlayerCountExt</TargetName>
     <TargetExt>.dll</TargetExt>
   </PropertyGroup>
 
@@ -71,12 +71,10 @@
 
   <ItemGroup>
     <ClCompile Include="src\Main.cpp" />
-    <ClCompile Include="src\Config.cpp" />
-    <ClCompile Include="src\ExtraHouses.cpp" />
     <ClCompile Include="src\Instrumentation.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\MegaSkirmish.h" />
+    <ClInclude Include="src\PlayerCountExt.h" />
     <ClInclude Include="src\GameConstruct.h" />
   </ItemGroup>
 
