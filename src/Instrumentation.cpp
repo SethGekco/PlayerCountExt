@@ -42,6 +42,7 @@
 
 #include <HouseClass.h>
 #include <HouseTypeClass.h>
+#include <ScenarioClass.h>
 
 namespace
 {
@@ -75,6 +76,76 @@ namespace
 
 	// Snapshot taken at entry so the exit hook can report a delta.
 	int HouseCountAtEntry = -1;
+
+	// -----------------------------------------------------------------------
+	// Waypoint / start-position probe.
+	//
+	// Groundwork for synthesising extra start positions: the plan is to write
+	// unused entries of ScenarioClass::Waypoints[702] with coordinates derived
+	// from the map's real waypoints, so the engine sees more genuinely normal
+	// start positions instead of us hooking unit placement.
+	//
+	// Before writing to that array we confirm we have the right one. YRpp's
+	// struct layout is a best-effort mapping and has been wrong before in this
+	// very subsystem (its AISlotsStruct mislabels Countries as StartingSpots),
+	// so we cross-check YRpp's computed offset against the +0x632 recovered
+	// from the disassembly of the start counter at 0x6883B7
+	// (`lea 0x632(%edx),%ecx`). Agreement means the rest of the struct — the
+	// fields we actually intend to write — can be trusted.
+	// -----------------------------------------------------------------------
+	constexpr DWORD AddrScenarioPtr   = 0xA8B230; // holds a ScenarioClass*
+	constexpr int   ExpectedWaypointOffset = 0x632;
+
+	void ProbeWaypoints()
+	{
+		const auto pScen = *reinterpret_cast<ScenarioClass* const volatile*>(AddrScenarioPtr);
+		if (!pScen)
+		{
+			PlayerCountExt::Log("[wp] ScenarioClass::Instance is NULL — probe skipped\n");
+			return;
+		}
+
+		const auto base = reinterpret_cast<const char*>(pScen);
+		const auto wpOffset = static_cast<int>(
+			reinterpret_cast<const char*>(&pScen->Waypoints[0]) - base);
+
+		PlayerCountExt::Log("[wp] ScenarioClass::Instance = 0x%08X\n",
+			reinterpret_cast<DWORD>(pScen));
+		PlayerCountExt::Log("[wp] Waypoints offset: yrpp=0x%X disasm=0x%X %s\n",
+			wpOffset, ExpectedWaypointOffset,
+			(wpOffset == ExpectedWaypointOffset) ? "ok" : "<<< MISMATCH - do NOT write");
+		PlayerCountExt::Log("[wp] NumberStartingPoints = %d  (offset 0x%X)\n",
+			pScen->NumberStartingPoints,
+			static_cast<int>(reinterpret_cast<const char*>(&pScen->NumberStartingPoints) - base));
+
+		// The engine's "undefined waypoint" sentinel, compared as two WORDs at
+		// 0xB05458 / 0xB0545A by the counter loop.
+		const short sentX = Peek<short>(0xB05458);
+		const short sentY = Peek<short>(0xB0545A);
+		PlayerCountExt::Log("[wp] undefined-sentinel = (%d,%d)\n", sentX, sentY);
+
+		// First 16 waypoints: how many the map really defines, and where the
+		// free space for synthetic entries begins.
+		PlayerCountExt::Log("[wp] Waypoints[0..15]:\n");
+		for (int i = 0; i < 16; ++i)
+		{
+			const auto& wp = pScen->Waypoints[i];
+			const bool defined = !(wp.X == sentX && wp.Y == sentY);
+			PlayerCountExt::Log("[wp]   wp%-2d = (%5d,%5d) %s\n",
+				i, wp.X, wp.Y, defined ? "defined" : "-");
+		}
+
+		PlayerCountExt::Log("[wp] StartingPoints[8]:");
+		for (int i = 0; i < 8; ++i)
+			PlayerCountExt::Log(" (%d,%d)", pScen->StartingPoints[i].X, pScen->StartingPoints[i].Y);
+		PlayerCountExt::Log("\n");
+
+		// 16-wide in vanilla — headroom the start->house map already has.
+		PlayerCountExt::Log("[wp] HouseIndices[16]:");
+		for (int i = 0; i < 16; ++i)
+			PlayerCountExt::Log(" %d", pScen->HouseIndices[i]);
+		PlayerCountExt::Log("\n");
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +206,8 @@ DEFINE_HOOK(0x687F10, PlayerCountExt_AssignHouses_Entry, 0x5)
 	// assert that, print both side by side and let the engine referee it. A
 	// MISMATCH line means OUR mapping is wrong, not that the game is.
 	// -----------------------------------------------------------------------
+	ProbeWaypoints();
+
 	auto& spawn = PlayerCountExt::SpawnConfig::Get();
 	spawn.Load();
 	spawn.LogSummary();
