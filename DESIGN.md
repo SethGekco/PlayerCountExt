@@ -166,7 +166,31 @@ Implemented and CI-green:
 - `src/Main.cpp` — `-SPAWN` gate at `0x52F639` ✔ (`YR_CmdLineParse` in the
   Antares PDB; clean 5-byte boundary; `ESI` = argv, `EDI` = argc).
 
-**Deployed, not yet run.** No log has been captured from a live game.
+**RUNTIME-VALIDATED 2026-08-23.** A live 1-human + 2-AI skirmish (Antares +
+Phobos + CnCNet spawner) confirmed every address in section 1: `0xA8B238`
+GameMode, `0xA8DA78`/`0xA8DA84`, `0xA8B274`, `0xA8B29C`, the 0x20 stride, and
+`+0x16054` (cross-checked via YRpp's struct *and* the raw offset — agreed on all
+five houses). Neutral and Special confirmed created unconditionally and last.
+
+Two findings only a live run produced:
+
+- **⚠ The AI-loop sentinels SKIP; they do not terminate the loop.** All three
+  jumps (`jge` on the AIPlayers test, `je` on -1, `je` on -3) target `0x6882C2`,
+  which is the `add $0x4,%ebx` **increment**. The loop always walks all 8 slots,
+  and `EAX` counts houses *created* (incremented only at `0x68817E`), not the
+  slot index. Observed: `Countries[] = {-1, 0, 6, -1, …}` — slot 0 holds the
+  sentinel — still produced 2 AI houses, from slots 1 and 2. **A batch-refill
+  implementation must account for this**: the loop does not stop early, so
+  refilling is about *what the slots contain*, not about extending a scan.
+- **⚠ `AssignHouses` runs TWICE per game start**, with `HouseClass::Array.Count`
+  back at 0 on the second — torn down and rebuilt, not appended to. Matches the
+  two call sites (`0x68745E`, `0x68ACFF`). **Any hook here must be idempotent or
+  explicitly one-shot.**
+
+**Deployment note:** Syringe does **not** auto-scan the game folder on this
+setup. The inject list is `Resources/Compatibility/Unix/wine-game.sh` line 2;
+a DLL absent from it is never loaded — no handshake, no hooks, no log, and the
+game behaves perfectly vanilla.
 
 ### Next
 1. Run the instrumentation; confirm or refute the address map.
