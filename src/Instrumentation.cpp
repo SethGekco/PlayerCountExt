@@ -35,6 +35,7 @@
 // consumer yet — the real house-creation path will use it — and a header that
 // is never included is a compile-time guard that never runs.
 #include "GameConstruct.h"
+#include "SpawnConfig.h"
 
 #include <Syringe.h>
 #include <Helpers/Macro.h>
@@ -57,6 +58,7 @@ namespace
 	constexpr DWORD AddrPlayersCount     = 0xA8DA84;
 	constexpr DWORD AddrAIPlayers        = 0xA8B274;
 	constexpr DWORD AddrAISlotsCountries = 0xA8B29C; // int[8]
+	constexpr DWORD AddrAISlotsColors    = 0xA8B2BC; // int[8], also the 0x6882C5 end bound
 	constexpr int   OffColorSchemeIndex  = 0x16054;
 
 	const char* GameModeName(int mode)
@@ -100,18 +102,69 @@ DEFINE_HOOK(0x687F10, PlayerCountExt_AssignHouses_Entry, 0x5)
 	PlayerCountExt::Log("[instr] AIPlayers     = %d        [0xA8B274]\n", aiPlayers);
 	PlayerCountExt::Log("[instr] HouseClass::Array.Count (before) = %d\n", HouseCountAtEntry);
 
-	// AISlots.Countries[8] @ 0xA8B29C. The AI loop stops at the first -1/-3
-	// sentinel, and is hard-bounded by the pointer compare at 0x6882C5
-	// (end address 0xA8B2BC == &Countries[8] == &Colours[0]).
+	// AISlots.Countries[8] @0xA8B29C and Colors[8] @0xA8B2BC.
+	//
+	// NOTE the -1/-3 sentinels SKIP a slot, they do NOT end the loop: all three
+	// conditional jumps target 0x6882C2, which is the `add $0x4,%ebx` increment.
+	// The loop always walks all 8 slots; EAX counts houses CREATED (incremented
+	// only at 0x68817E), not the slot index. The hard bound is the pointer
+	// compare at 0x6882C5 against 0xA8B2BC (== &Countries[8] == &Colors[0]).
 	PlayerCountExt::Log("[instr] AISlots.Countries[8] @0xA8B29C =");
 	for (int i = 0; i < 8; ++i)
 		PlayerCountExt::Log(" %d", Peek<int>(AddrAISlotsCountries + i * 4));
 	PlayerCountExt::Log("\n");
 
+	PlayerCountExt::Log("[instr] AISlots.Colors[8]    @0xA8B2BC =");
+	for (int i = 0; i < 8; ++i)
+		PlayerCountExt::Log(" %d", Peek<int>(AddrAISlotsColors + i * 4));
+	PlayerCountExt::Log("\n");
+
 	// Sanity: this must be 0x20 (32 bytes = 8 ints) or the layout assumption
 	// behind the 0x6882C5 cap is wrong.
 	PlayerCountExt::Log("[instr] AISlots stride check: 0xA8B2BC - 0xA8B29C = 0x%X (expect 0x20)\n",
-		0xA8B2BC - AddrAISlotsCountries);
+		AddrAISlotsColors - AddrAISlotsCountries);
+
+	// -----------------------------------------------------------------------
+	// spawn.ini parse + cross-check.
+	//
+	// Reload every time: AssignHouses runs twice per game start, and returning
+	// to the menu rewrites the file. Load() is a full reset, so this is safe.
+	//
+	// The cross-check is the point of this block. We believe AISlots[i]
+	// corresponds to Multi(i+1), with human-owned slots left at -1. Rather than
+	// assert that, print both side by side and let the engine referee it. A
+	// MISMATCH line means OUR mapping is wrong, not that the game is.
+	// -----------------------------------------------------------------------
+	auto& spawn = PlayerCountExt::SpawnConfig::Get();
+	spawn.Load();
+	spawn.LogSummary();
+
+	if (spawn.Loaded())
+	{
+		if (spawn.AIPlayers() != aiPlayers)
+			PlayerCountExt::Log("[xchk] AIPlayers: spawn.ini=%d engine@0xA8B274=%d   <<< MISMATCH\n",
+				spawn.AIPlayers(), aiPlayers);
+		else
+			PlayerCountExt::Log("[xchk] AIPlayers agrees (%d)\n", aiPlayers);
+
+		PlayerCountExt::Log("[xchk] AISlots[i] vs spawn.ini Multi(i+1):\n");
+		for (int i = 0; i < 8; ++i)
+		{
+			const int engCountry = Peek<int>(AddrAISlotsCountries + i * 4);
+			const int engColor   = Peek<int>(AddrAISlotsColors    + i * 4);
+			const auto& h = spawn.House(i + 1);
+
+			// A slot the engine left at -1 with no spawn.ini entry is just an
+			// unused slot; not worth a line.
+			if (engCountry == -1 && !h.Defined)
+				continue;
+
+			PlayerCountExt::Log("[xchk]   slot%d Multi%-2d country eng=%-3d ini=%-3d %s | color eng=%-3d ini=%-3d\n",
+				i, i + 1, engCountry, h.Country,
+				(h.Country == engCountry) ? "ok" : "<<< MISMATCH",
+				engColor, h.Color);
+		}
+	}
 
 	return 0; // continue original code
 }
