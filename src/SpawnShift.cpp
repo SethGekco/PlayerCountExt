@@ -60,6 +60,11 @@
 #include "PlayerCountExt.h"
 #include "SpawnConfig.h"
 
+#include <Windows.h>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
+
 #include <Syringe.h>
 #include <Helpers/Macro.h>
 
@@ -96,7 +101,7 @@ namespace
 	// have heavily overlapping build radii and fight for room. 20 gives each
 	// base somewhere to grow while keeping them recognisably "at the same
 	// start". Worth revisiting once it can be seen in game.
-	constexpr int ShiftDistance = 20;
+	constexpr int ShiftDistance = 20; // built-in default; per-map overrides below
 
 	// Start positions the current map actually declares. Set from the engine's
 	// NumberStartingPoints; until we know it, assume vanilla 8 so ring maths
@@ -115,6 +120,144 @@ namespace
 		const int n = *reinterpret_cast<int const volatile*>(pScen + OffNumberStartingPoints);
 		if (n > 0)
 			RealStartCount = n;
+	}
+
+	// -----------------------------------------------------------------------
+	// Per-map shift overrides.
+	//
+	// The map INI is the right home for this: it travels with the map, and
+	// every client already holds an identical copy (the host distributes it),
+	// so it inherits the same determinism guarantee as spawn.ini. A separate
+	// side-file would not — one client could have it and another not, and they
+	// would place the same house differently.
+	//
+	// Schema, in [PlayerCountExt] of the map INI. Most specific wins:
+	//
+	//   Shift.<base>.<dir>      = dX,dY   explicit cell offset, overrides all
+	//   ShiftDistance.<base>.<dir> = N    distance for one spawn+direction
+	//   ShiftDistance.<dir>     = N       distance for one direction
+	//   ShiftDistance           = N       this map's default
+	//   (built-in)                        DefaultShiftDistance
+	//
+	// <base> is the 1-based start position ("1".."8"), <dir> one of
+	// N NE E SE S SW W NW. So a map author can write:
+	//
+	//   [PlayerCountExt]
+	//   ShiftDistance=24            ; roomier than default everywhere
+	//   ShiftDistance.1=30          ; spawn 1 has more space
+	//   Shift.3.NE=+12,-40          ; spawn 3 NE is around a cliff
+	//
+	// Absent section = current behaviour, so existing maps are unaffected.
+	// -----------------------------------------------------------------------
+	constexpr const char* ShiftSection = "PlayerCountExt";
+	constexpr const char* DirNames[] = { "", "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+
+	// Path to the map INI, built from spawn.ini's [Settings] Scenario. Prefixed
+	// ".\\" for the same reason SpawnConfig does — a bare name resolves against
+	// the Windows directory, not the game folder.
+	const char* MapIniPath()
+	{
+		static char path[96];
+		const char* scenario = PlayerCountExt::SpawnConfig::Get().Scenario();
+
+		if (!scenario || !scenario[0])
+			return nullptr;
+
+		std::snprintf(path, sizeof(path), ".\\%s", scenario);
+		return path;
+	}
+
+	// Reads an int key, or INT_MIN when absent. Deliberately not
+	// GetPrivateProfileInt — it parses unsigned and turns negatives into 0.
+	int ReadMapInt(const char* key)
+	{
+		const char* path = MapIniPath();
+		if (!path)
+			return INT_MIN;
+
+		char buf[64] = {};
+		if (!GetPrivateProfileStringA(ShiftSection, key, "", buf, sizeof(buf), path) || !buf[0])
+			return INT_MIN;
+
+		char* end = nullptr;
+		const long v = std::strtol(buf, &end, 10);
+		return (end == buf) ? INT_MIN : static_cast<int>(v);
+	}
+
+	// Reads "dX,dY". Returns false when absent or malformed.
+	bool ReadMapOffset(const char* key, int& dX, int& dY)
+	{
+		const char* path = MapIniPath();
+		if (!path)
+			return false;
+
+		char buf[64] = {};
+		if (!GetPrivateProfileStringA(ShiftSection, key, "", buf, sizeof(buf), path) || !buf[0])
+			return false;
+
+		char* end = nullptr;
+		const long x = std::strtol(buf, &end, 10);
+		if (end == buf || *end != ',')
+			return false;
+
+		char* end2 = nullptr;
+		const long y = std::strtol(end + 1, &end2, 10);
+		if (end2 == end + 1)
+			return false;
+
+		dX = static_cast<int>(x);
+		dY = static_cast<int>(y);
+		return true;
+	}
+
+	// Resolves the offset for one (base spawn, ring) pair through the cascade.
+	// baseIndex is 0-based here; the INI keys are 1-based.
+	void ResolveOffset(int baseIndex, int ring, int& dX, int& dY, const char*& source)
+	{
+		const char* dir = DirNames[ring];
+		char key[64];
+
+		// 1. explicit offset for this spawn + direction
+		std::snprintf(key, sizeof(key), "Shift.%d.%s", baseIndex + 1, dir);
+		if (ReadMapOffset(key, dX, dY))
+		{
+			source = "map Shift.<base>.<dir>";
+			return;
+		}
+
+		// 2..4. distance overrides, most specific first
+		int distance = INT_MIN;
+		source = "built-in default";
+
+		std::snprintf(key, sizeof(key), "ShiftDistance.%d.%s", baseIndex + 1, dir);
+		distance = ReadMapInt(key);
+		if (distance != INT_MIN) { source = "map ShiftDistance.<base>.<dir>"; }
+
+		if (distance == INT_MIN)
+		{
+			std::snprintf(key, sizeof(key), "ShiftDistance.%s", dir);
+			distance = ReadMapInt(key);
+			if (distance != INT_MIN) source = "map ShiftDistance.<dir>";
+		}
+
+		if (distance == INT_MIN)
+		{
+			std::snprintf(key, sizeof(key), "ShiftDistance.%d", baseIndex + 1);
+			distance = ReadMapInt(key);
+			if (distance != INT_MIN) source = "map ShiftDistance.<base>";
+		}
+
+		if (distance == INT_MIN)
+		{
+			distance = ReadMapInt("ShiftDistance");
+			if (distance != INT_MIN) source = "map ShiftDistance";
+		}
+
+		if (distance == INT_MIN)
+			distance = ShiftDistance;
+
+		dX = RingOffsets[ring].dX * distance;
+		dY = RingOffsets[ring].dY * distance;
 	}
 
 	constexpr DWORD AddrHouseArrayItems = 0xA8022C;
@@ -307,12 +450,15 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		return 0;
 	}
 
-	const auto& off = RingOffsets[ring];
+	int dX = 0, dY = 0;
+	const char* source = "built-in default";
+	ResolveOffset(base, ring, dX, dY, source);
+
 	const short oldX = cell.Cell.X;
 	const short oldY = cell.Cell.Y;
 
-	cell.Cell.X = static_cast<short>(oldX + off.dX * ShiftDistance);
-	cell.Cell.Y = static_cast<short>(oldY + off.dY * ShiftDistance);
+	cell.Cell.X = static_cast<short>(oldX + dX);
+	cell.Cell.Y = static_cast<short>(oldY + dY);
 
 	*pHomeCell = cell.Raw;
 
@@ -334,9 +480,9 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	}
 
 	static const char* const Suffix[] = { "", "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
-	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — (%d,%d) shifted %d cells to (%d,%d)\n",
+	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — (%d,%d) + (%+d,%+d) = (%d,%d)  [%s]\n",
 		pHouse, startIndex, base + 1, Suffix[ring],
-		oldX, oldY, ShiftDistance, cell.Cell.X, cell.Cell.Y);
+		oldX, oldY, dX, dY, cell.Cell.X, cell.Cell.Y, source);
 
 	return 0;
 }

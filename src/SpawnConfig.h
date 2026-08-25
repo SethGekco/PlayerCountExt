@@ -64,6 +64,11 @@ namespace PlayerCountExt
 		int  AIPlayers()   const { return this->AICount; }
 		int  Seed()        const { return this->RandomSeed; }
 
+		// [Settings] Scenario — the map INI the client wrote for this game
+		// (normally "spawnmap.ini"). Empty if absent. Callers use this rather
+		// than assuming a filename, since it is what the engine itself loads.
+		const char* Scenario() const { return this->ScenarioFile; }
+
 		// Highest MultiN that had any key defined (0 if none).
 		int  HighestDefined() const { return this->Highest; }
 
@@ -77,6 +82,7 @@ namespace PlayerCountExt
 		SpawnConfig() = default;
 
 		bool IsLoaded   = false;
+		char ScenarioFile[64] {};
 		int  Players    = 0;
 		int  AICount    = 0;
 		int  RandomSeed = 0;

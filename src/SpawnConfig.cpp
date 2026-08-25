@@ -83,6 +83,9 @@ namespace PlayerCountExt
 
 		this->Highest = 0;
 
+		GetPrivateProfileStringA("Settings", "Scenario", "",
+			this->ScenarioFile, sizeof(this->ScenarioFile), SpawnIniPath);
+
 		const int players = ReadInt("Settings", "PlayerCount");
 		const int ai      = ReadInt("Settings", "AIPlayers");
 		const int seed    = ReadInt("Settings", "Seed");
@@ -94,6 +97,7 @@ namespace PlayerCountExt
 		{
 			this->IsLoaded = false;
 			this->Players = this->AICount = this->RandomSeed = 0;
+			this->ScenarioFile[0] = '\0';
 			Log("[spawn] spawn.ini not found or unreadable at \"%s\" — no config.\n",
 				SpawnIniPath);
 			return;
@@ -137,8 +141,8 @@ namespace PlayerCountExt
 			return;
 		}
 
-		Log("[spawn] PlayerCount=%d AIPlayers=%d Seed=%d highestMulti=%d\n",
-			this->Players, this->AICount, this->RandomSeed, this->Highest);
+		Log("[spawn] PlayerCount=%d AIPlayers=%d Seed=%d highestMulti=%d scenario=\"%s\"\n",
+			this->Players, this->AICount, this->RandomSeed, this->Highest, this->ScenarioFile);
 
 		for (int n = 1; n <= this->Highest; ++n)
 		{
