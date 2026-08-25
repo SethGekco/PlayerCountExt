@@ -116,6 +116,39 @@ namespace
 		if (n > 0)
 			RealStartCount = n;
 	}
+
+	constexpr DWORD AddrHouseArrayItems = 0xA8022C;
+	constexpr DWORD AddrHouseArrayCount = 0xA80238;
+
+	// The start index the PLAYER chose, taken from spawn.ini rather than from
+	// the house — see the note at the call site for why the house's own field
+	// cannot be trusted at this point.
+	//
+	// Returns -1 when spawn.ini says nothing about this house, in which case
+	// the caller leaves the engine's own answer alone.
+	int StartIndexFromSpawnIni(DWORD pHouse)
+	{
+		const auto& spawn = PlayerCountExt::SpawnConfig::Get();
+		if (!spawn.Loaded())
+			return -1;
+
+		const auto items = *reinterpret_cast<DWORD* const volatile*>(AddrHouseArrayItems);
+		const int count = *reinterpret_cast<int const volatile*>(AddrHouseArrayCount);
+		if (!items || count <= 0)
+			return -1;
+
+		for (int i = 0; i < count; ++i)
+		{
+			if (items[i] != pHouse)
+				continue;
+
+			// MultiN is 1-based over the house array.
+			const auto& h = spawn.House(i + 1);
+			return (h.Defined && h.SpawnLocation >= 0) ? h.SpawnLocation : -1;
+		}
+
+		return -1; // not a house from the multiplayer slots (Neutral/Special)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +267,18 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 	RefreshRealStartCount();
 
-	const int startIndex = *reinterpret_cast<int const volatile*>(pHouse + 0x16058);
+	// Do NOT trust HouseClass+0x16058 here.
+	//
+	// The CnCNet spawner clamps spawn locations to 0..7, and it does so AFTER
+	// AssignHouses — proven in game: our restore at the AssignHouses epilogue
+	// saw the field as 0 and set it to 8, yet by the time this hook runs the
+	// same house reads 7. Restoring it earlier or later is a race against
+	// another DLL's write order, which is not a fight worth having.
+	//
+	// spawn.ini is host-authoritative and immutable once written, so we read
+	// the player's actual choice from there instead. The house's position in
+	// HouseClass::Array gives us its MultiN slot (1-based).
+	const int startIndex = StartIndexFromSpawnIni(pHouse);
 
 	if (startIndex < 0 || RealStartCount <= 0)
 		return 0;
