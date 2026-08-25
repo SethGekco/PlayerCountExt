@@ -58,6 +58,7 @@
 */
 
 #include "PlayerCountExt.h"
+#include "SpawnConfig.h"
 
 #include <Syringe.h>
 #include <Helpers/Macro.h>
