@@ -118,7 +118,7 @@ namespace
 	// Rather than guess a fifth mechanism, establish ground truth first: run a
 	// known plain start position and see, from BaseCellTrace, which cell is
 	// written and by whom. Flip this back to true once that is known.
-	constexpr bool ApplyShift = false;
+	constexpr bool ApplyShift = true;
 
 	// Start positions the current map actually declares. Set from the engine's
 	// NumberStartingPoints; until we know it, assume vanilla 8 so ring maths
@@ -321,81 +321,100 @@ namespace
 //
 // ESI = house->StartIndex (+0x16058), ECX = the house, 0xC(%esp) = cell table.
 // ---------------------------------------------------------------------------
-// ⚠ DEAD PATH — kept compiled out, not deleted, because the reason matters.
+// THE REAL HOOK.
 //
-// 0x5D6C1D looked like the place: it is `mov (%eax,%esi,4),%edx`, a clean
-// start-index -> cell lookup feeding SetBaseCell. But an in-game run produced
-// ZERO log lines from it, so the loop containing it is simply not reached in a
-// normal skirmish — it is one of two callers of 0x50E000 in this region and
-// evidently the wrong one.
+// ⚠ This was previously disabled as a "dead path" — wrongly. A run in which
+// every player was on Random produced no log lines here, and that was
+// generalised into "never reached". A base-cell trace later showed it firing
+// via 0x5D6C2A for exactly the houses with an EXPLICIT start index, while the
+// Random houses (-2) go through 0x5D6D3F instead:
 //
-// The live path is the function at 0x5D6C70, where TWO cell sources converge
-// (a virtual call at 0x5D6D25, and a table lookup at 0x5D6D30) before a single
-// SetBaseCell at 0x5D6D3A. See the live hook below.
+//   [trace] home house@... start=7  cell=(178,111) <- caller 0x005D6C2A
+//   [trace] home house@... start=0  cell=(111,178) <- caller 0x005D6C2A
+//   [trace] home house@... start=-2 cell=(35,102)  <- caller 0x005D6D3F
 //
-// Recorded rather than removed: "this address looks right and is never
-// executed" is exactly the kind of thing worth not rediscovering.
-#define PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH 0
+// Explicitly-chosen starts are precisely the case this feature exists for, so
+// this is the right place. The lesson: a hook that is silent under one lobby
+// configuration is not thereby dead.
+#define PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH 1
 #if PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH
 
 DEFINE_HOOK(0x5D6C1D, PlayerCountExt_SpawnShift_IndexToCell, 0x7)
 {
-	GET(int, startIndex, ESI);
-	GET_STACK(DWORD, pTable, 0xC);
+	GET(int, engineIndex, ESI);      // the (possibly clamped) index the engine has
+	GET(DWORD, pHouse, ECX);
+	GET_STACK(DWORD, pTable, 0xC);   // the engine's own cell table
+
+	// Stolen instruction #1. Must happen whatever we decide, because 0x5D6C2F
+	// reuses EAX.
+	R->EAX(pTable);
+
+	const auto table = reinterpret_cast<const DWORD*>(pTable);
 
 	RefreshRealStartCount();
 
-	// Reproduce the stolen load unconditionally so EAX is what the engine
-	// expects at 0x5D6C2F, which does `mov %edi,0x1180(%eax,%esi,4)` — that
-	// instruction reuses EAX as the ScenarioClass pointer it reloads at
-	// 0x5D6C2A, so we must not leave it holding something surprising here.
-	R->EAX(pTable);
+	// The player's real choice, not the spawner's clamped copy.
+	int startIndex = StartIndexFromSpawnIni(pHouse);
+	if (startIndex < 0)
+		startIndex = engineIndex;
 
 	if (startIndex < 0 || RealStartCount <= 0)
-		return 0x5D6C24; // nothing sensible to do; let the engine proceed
+	{
+		R->EDX(table[engineIndex < 0 ? 0 : engineIndex]);
+		return 0x5D6C24;
+	}
 
 	const int ring = startIndex / RealStartCount;
 	const int base = startIndex % RealStartCount;
 
-	const auto table = reinterpret_cast<const DWORD*>(pTable);
-
-	// Ring 0 is the vanilla path: identical bytes, identical result.
-	if (ring == 0 || ring >= RingCount)
-	{
-		if (ring >= RingCount)
-		{
-			PlayerCountExt::Log("[shift] start %d exceeds ring table (%d rings x %d starts) — using base %d unshifted\n",
-				startIndex, RingCount, RealStartCount, base);
-		}
-		else
-		{
-			// Log the unshifted case too. Without this, "the hook ran and took
-			// the vanilla path" and "the hook never fired" produce identical
-			// logs — which would make a future shift failure impossible to
-			// diagnose. Cheap: it is once per house per game.
-			PlayerCountExt::Log("[shift] start %d ring0 (realCount=%d) — unshifted, cell (%d,%d)\n",
-				startIndex, RealStartCount,
-				PackedCell{ table[base] }.Cell.X, PackedCell{ table[base] }.Cell.Y);
-		}
-
-		R->EDX(table[base]);
-		return 0x5D6C24;
-	}
-
+	// Take the cell of the BASE position, not of whatever index the engine
+	// currently holds. Shifting from the clamped cell would move the house
+	// relative to the wrong spawn — it is the difference between "20 north of
+	// spawn 1" and "20 north of wherever the clamp landed".
 	PackedCell cell;
 	cell.Raw = table[base];
 
-	const auto& off = RingOffsets[ring];
-	cell.Cell.X = static_cast<short>(cell.Cell.X + off.dX * ShiftDistance);
-	cell.Cell.Y = static_cast<short>(cell.Cell.Y + off.dY * ShiftDistance);
+	// Keep the engine's own bookkeeping consistent: 0x5D6C2F does
+	// `mov %edi,0x1180(%eax,%esi,4)`, i.e. HouseIndices[ESI] = house. Point it
+	// at the base position so the start->house table records something real.
+	R->ESI(base);
 
-	static const char* const Suffix[] = { "", "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
-	PlayerCountExt::Log("[shift] start %d = \"%d%s\" -> base %d cell (%d,%d) shifted %d cells to (%d,%d)\n",
-		startIndex, base + 1, Suffix[ring], base,
-		PackedCell{ table[base] }.Cell.X, PackedCell{ table[base] }.Cell.Y,
-		ShiftDistance, cell.Cell.X, cell.Cell.Y);
+	if (ring == 0 || ring >= RingCount)
+	{
+		if (ring >= RingCount)
+			PlayerCountExt::Log("[shift] start %d exceeds ring table (%d rings x %d starts) — using base %d\n",
+				startIndex, RingCount, RealStartCount, base + 1);
+		else
+			PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 — base %d cell (%d,%d)\n",
+				pHouse, startIndex, base + 1, cell.Cell.X, cell.Cell.Y);
 
-	R->EDX(cell.Raw);
+		R->EDX(cell.Raw);
+		return 0x5D6C24;
+	}
+
+	int dX = 0, dY = 0;
+	const char* source = "built-in default";
+	ResolveOffset(base, ring, dX, dY, source);
+
+	const short oldX = cell.Cell.X;
+	const short oldY = cell.Cell.Y;
+
+	// NOTE: no map-bounds check here. An earlier revision rejected shifts using
+	// the header rectangle (StartX/StartY/Width/Height), but those fields are
+	// NOT in cell-coordinate space: every genuine spawn cell on the test map
+	// (X between 35 and 178) fell outside the header's x[206,305), so the check
+	// rejected perfectly valid positions. Validating the target needs a real
+	// cell lookup, not that rectangle. Until then a shift can still land
+	// somewhere unhelpful — but it is no longer blocked for a bogus reason.
+	cell.Cell.X = static_cast<short>(oldX + dX);
+	cell.Cell.Y = static_cast<short>(oldY + dY);
+
+	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — base %d cell (%d,%d) + (%+d,%+d) = (%d,%d)  [%s]%s\n",
+		pHouse, startIndex, base + 1, DirNames[ring], base + 1,
+		oldX, oldY, dX, dY, cell.Cell.X, cell.Cell.Y, source,
+		ApplyShift ? "" : "  (diagnostic, not applied)");
+
+	R->EDX(ApplyShift ? cell.Raw : table[base]);
 	return 0x5D6C24;
 }
 
