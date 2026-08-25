@@ -76,6 +76,7 @@
     <ClCompile Include="src\AIRefill.cpp" />
     <ClCompile Include="src\StartPoints.cpp" />
     <ClCompile Include="src\SpawnShift.cpp" />
+    <ClCompile Include="src\BaseCellTrace.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\PlayerCountExt.h" />
