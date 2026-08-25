@@ -127,6 +127,23 @@ namespace
 //
 // ESI = house->StartIndex (+0x16058), ECX = the house, 0xC(%esp) = cell table.
 // ---------------------------------------------------------------------------
+// ⚠ DEAD PATH — kept compiled out, not deleted, because the reason matters.
+//
+// 0x5D6C1D looked like the place: it is `mov (%eax,%esi,4),%edx`, a clean
+// start-index -> cell lookup feeding SetBaseCell. But an in-game run produced
+// ZERO log lines from it, so the loop containing it is simply not reached in a
+// normal skirmish — it is one of two callers of 0x50E000 in this region and
+// evidently the wrong one.
+//
+// The live path is the function at 0x5D6C70, where TWO cell sources converge
+// (a virtual call at 0x5D6D25, and a table lookup at 0x5D6D30) before a single
+// SetBaseCell at 0x5D6D3A. See the live hook below.
+//
+// Recorded rather than removed: "this address looks right and is never
+// executed" is exactly the kind of thing worth not rediscovering.
+#define PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH 0
+#if PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH
+
 DEFINE_HOOK(0x5D6C1D, PlayerCountExt_SpawnShift_IndexToCell, 0x7)
 {
 	GET(int, startIndex, ESI);
@@ -186,4 +203,95 @@ DEFINE_HOOK(0x5D6C1D, PlayerCountExt_SpawnShift_IndexToCell, 0x7)
 
 	R->EDX(cell.Raw);
 	return 0x5D6C24;
+}
+
+#endif // PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH
+
+// ---------------------------------------------------------------------------
+// The live hook — 0x5D6D3F, immediately AFTER SetBaseCell.
+//
+//     5d6d25:  call *0xc4(%edx)          ; path A: virtual cell computation
+//     5d6d30:  mov  (%ecx,%edx,4),%edx   ; path B: direct table lookup
+//     5d6d38:  mov  %edi,%ecx            ; EDI = the house
+//     5d6d3a:  call 0x50e000             ; SetBaseCell(cell)
+//     5d6d3f:  mov  0xa80238,%eax        ; <-- we hook here (5 bytes)
+//
+// Post-correcting rather than intercepting is deliberate: two different cell
+// sources converge on that one setter, so correcting AFTER it handles both with
+// a single hook and no need to know which path ran. It also means we never have
+// to reproduce the engine's own cell selection — we only adjust its answer.
+//
+// EDI = the house. The start index is read from the house itself (+0x16058),
+// so we do not depend on any register the two paths might set differently.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
+{
+	GET(DWORD, pHouse, EDI);
+
+	if (!pHouse)
+		return 0;
+
+	RefreshRealStartCount();
+
+	const int startIndex = *reinterpret_cast<int const volatile*>(pHouse + 0x16058);
+
+	if (startIndex < 0 || RealStartCount <= 0)
+		return 0;
+
+	const int ring = startIndex / RealStartCount;
+	const int base = startIndex % RealStartCount;
+
+	// +0x5490 is the cell 0x50E000 just wrote (the getters fall back to it when
+	// +0x5494 is the invalid-cell sentinel).
+	const auto pHomeCell = reinterpret_cast<DWORD*>(pHouse + 0x5490);
+
+	PackedCell cell;
+	cell.Raw = *pHomeCell;
+
+	if (ring == 0)
+	{
+		PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 (realCount=%d) — unshifted, cell (%d,%d)\n",
+			pHouse, startIndex, RealStartCount, cell.Cell.X, cell.Cell.Y);
+		return 0;
+	}
+
+	if (ring >= RingCount)
+	{
+		PlayerCountExt::Log("[shift] house@0x%08X start %d exceeds ring table (%d rings x %d starts) — left unshifted\n",
+			pHouse, startIndex, RingCount, RealStartCount);
+		return 0;
+	}
+
+	const auto& off = RingOffsets[ring];
+	const short oldX = cell.Cell.X;
+	const short oldY = cell.Cell.Y;
+
+	cell.Cell.X = static_cast<short>(oldX + off.dX * ShiftDistance);
+	cell.Cell.Y = static_cast<short>(oldY + off.dY * ShiftDistance);
+
+	*pHomeCell = cell.Raw;
+
+	// Keep +0x5494 consistent when it holds a real cell rather than the
+	// invalid-cell sentinel, so both getters agree.
+	const auto pCurCell = reinterpret_cast<DWORD*>(pHouse + 0x5494);
+	if (*pCurCell == *pHomeCell || *pCurCell != 0)
+	{
+		PackedCell cur;
+		cur.Raw = *pCurCell;
+		const short sentX = *reinterpret_cast<short const volatile*>(0xA8EF98);
+		const short sentY = *reinterpret_cast<short const volatile*>(0xA8EF9A);
+		if (!(cur.Cell.X == sentX && cur.Cell.Y == sentY))
+		{
+			cur.Cell.X = static_cast<short>(cur.Cell.X + off.dX * ShiftDistance);
+			cur.Cell.Y = static_cast<short>(cur.Cell.Y + off.dY * ShiftDistance);
+			*pCurCell = cur.Raw;
+		}
+	}
+
+	static const char* const Suffix[] = { "", "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — (%d,%d) shifted %d cells to (%d,%d)\n",
+		pHouse, startIndex, base + 1, Suffix[ring],
+		oldX, oldY, ShiftDistance, cell.Cell.X, cell.Cell.Y);
+
+	return 0;
 }
