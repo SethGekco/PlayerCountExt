@@ -532,17 +532,35 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 		if (!h.Defined || h.SpawnLocation < 0)
 			continue;
 
+		// ⚠ Write the BASE index, never the shifted one.
+		//
+		// ScenarioClass::StartingPoints has exactly 8 entries and HouseIndices
+		// follows immediately after it, so a start index of 8+ is an
+		// out-of-bounds read for every consumer in the engine and in other
+		// DLLs. An earlier revision wrote spawn.ini's raw value (e.g. 8) here
+		// and the game died ~960 log lines into the scenario, at a wild jump to
+		// unmapped memory — against 22k-655k lines for every unrelated crash in
+		// the same period.
+		//
+		// The shift is carried entirely by the base CELL (see the hook at
+		// 0x5D6D3F). Nothing outside this DLL needs to know a house was
+		// shifted, and nothing outside this DLL can cope with being told.
+		RefreshRealStartCount();
+		if (RealStartCount <= 0)
+			continue;
+
+		const int baseIndex = h.SpawnLocation % RealStartCount;
+
 		const auto pStart = reinterpret_cast<int*>(pHouse + 0x16058);
 		const int current = *pStart;
 
-		if (current == h.SpawnLocation)
-			continue; // nothing was clamped
+		if (current == baseIndex)
+			continue;
 
-		PlayerCountExt::Log("[shift] house[%d] start index %d -> %d (restored from spawn.ini Multi%d; "
-			"the spawner had clamped it)\n",
-			i, current, h.SpawnLocation, i + 1);
+		PlayerCountExt::Log("[shift] house[%d] start index %d -> %d (spawn.ini Multi%d = %d, base of ring %d)\n",
+			i, current, baseIndex, i + 1, h.SpawnLocation, h.SpawnLocation / RealStartCount);
 
-		*pStart = h.SpawnLocation;
+		*pStart = baseIndex;
 	}
 
 	return 0;
