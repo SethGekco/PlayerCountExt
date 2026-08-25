@@ -473,8 +473,9 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		const short sentY = *reinterpret_cast<short const volatile*>(0xA8EF9A);
 		if (!(cur.Cell.X == sentX && cur.Cell.Y == sentY))
 		{
-			cur.Cell.X = static_cast<short>(cur.Cell.X + off.dX * ShiftDistance);
-			cur.Cell.Y = static_cast<short>(cur.Cell.Y + off.dY * ShiftDistance);
+			// Same resolved offset as the home cell, so the two stay in step.
+			cur.Cell.X = static_cast<short>(cur.Cell.X + dX);
+			cur.Cell.Y = static_cast<short>(cur.Cell.Y + dY);
 			*pCurCell = cur.Raw;
 		}
 	}
