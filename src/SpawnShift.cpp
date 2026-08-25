@@ -295,3 +295,63 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 	return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Restore the unclamped start index — AssignHouses epilogue, 0x688378.
+//
+// The CnCNet spawner clamps spawn locations to 0..7 before the engine sees
+// them (`std::clamp(nSpawnLocations, 0, 7)` in its Spawner.cpp), so a shifted
+// selection of 8 arrives as 7 — i.e. "1N" silently becomes "spawn 8". Proven
+// in game: spawn.ini carried [SpawnLocations] Multi1=8 while the house's
+// +0x16058 read 7.
+//
+// We cannot fix the spawner from here — it is a separate binary — but we do not
+// need to. spawn.ini is host-authoritative and we already parse it, so we
+// simply write the value the player actually chose back over the clamped one,
+// after AssignHouses has finished populating the house array.
+//
+// Mapping: [SpawnLocations] MultiN is 1-based over the house array, so
+// house[i] takes Multi(i+1). Confirmed by the same run: Multi1 corresponded to
+// house[0].
+//
+// This runs at the AssignHouses epilogue, which is also hooked for
+// instrumentation. Same-address hooks CHAIN in Syringe (unlike overlapping
+// ones, which corrupt each other), and both handlers return 0, so this is safe.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
+{
+	auto& spawn = PlayerCountExt::SpawnConfig::Get();
+	if (!spawn.Loaded())
+		return 0;
+
+	const auto pArrayItems = *reinterpret_cast<DWORD* const volatile*>(0xA8022C);
+	const int count = *reinterpret_cast<int const volatile*>(0xA80238);
+
+	if (!pArrayItems || count <= 0)
+		return 0;
+
+	for (int i = 0; i < count; ++i)
+	{
+		const DWORD pHouse = pArrayItems[i];
+		if (!pHouse)
+			continue;
+
+		const auto& h = spawn.House(i + 1); // MultiN is 1-based
+		if (!h.Defined || h.SpawnLocation < 0)
+			continue;
+
+		const auto pStart = reinterpret_cast<int*>(pHouse + 0x16058);
+		const int current = *pStart;
+
+		if (current == h.SpawnLocation)
+			continue; // nothing was clamped
+
+		PlayerCountExt::Log("[shift] house[%d] start index %d -> %d (restored from spawn.ini Multi%d; "
+			"the spawner had clamped it)\n",
+			i, current, h.SpawnLocation, i + 1);
+
+		*pStart = h.SpawnLocation;
+	}
+
+	return 0;
+}
