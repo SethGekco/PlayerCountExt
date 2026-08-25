@@ -152,8 +152,20 @@ DEFINE_HOOK(0x5D6C1D, PlayerCountExt_SpawnShift_IndexToCell, 0x7)
 	if (ring == 0 || ring >= RingCount)
 	{
 		if (ring >= RingCount)
+		{
 			PlayerCountExt::Log("[shift] start %d exceeds ring table (%d rings x %d starts) — using base %d unshifted\n",
 				startIndex, RingCount, RealStartCount, base);
+		}
+		else
+		{
+			// Log the unshifted case too. Without this, "the hook ran and took
+			// the vanilla path" and "the hook never fired" produce identical
+			// logs — which would make a future shift failure impossible to
+			// diagnose. Cheap: it is once per house per game.
+			PlayerCountExt::Log("[shift] start %d ring0 (realCount=%d) — unshifted, cell (%d,%d)\n",
+				startIndex, RealStartCount,
+				PackedCell{ table[base] }.Cell.X, PackedCell{ table[base] }.Cell.Y);
+		}
 
 		R->EDX(table[base]);
 		return 0x5D6C24;
