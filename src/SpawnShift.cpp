@@ -438,8 +438,18 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 	if (ring == 0)
 	{
-		PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 (realCount=%d) — unshifted, cell (%d,%d)\n",
-			pHouse, startIndex, RealStartCount, cell.Cell.X, cell.Cell.Y);
+		const auto pS = *reinterpret_cast<DWORD const volatile*>(AddrScenarioPtr);
+		if (pS)
+			PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 (realCount=%d) — unshifted, cell (%d,%d); "
+				"map x[%d,%d) y[%d,%d)\n",
+				pHouse, startIndex, RealStartCount, cell.Cell.X, cell.Cell.Y,
+				*reinterpret_cast<int const volatile*>(pS + 0x112C),
+				*reinterpret_cast<int const volatile*>(pS + 0x112C) + *reinterpret_cast<int const volatile*>(pS + 0x1134),
+				*reinterpret_cast<int const volatile*>(pS + 0x1130),
+				*reinterpret_cast<int const volatile*>(pS + 0x1130) + *reinterpret_cast<int const volatile*>(pS + 0x1138));
+		else
+			PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 (realCount=%d) — unshifted, cell (%d,%d)\n",
+				pHouse, startIndex, RealStartCount, cell.Cell.X, cell.Cell.Y);
 		return 0;
 	}
 
@@ -457,8 +467,48 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	const short oldX = cell.Cell.X;
 	const short oldY = cell.Cell.Y;
 
-	cell.Cell.X = static_cast<short>(oldX + dX);
-	cell.Cell.Y = static_cast<short>(oldY + dY);
+	const short newX = static_cast<short>(oldX + dX);
+	const short newY = static_cast<short>(oldY + dY);
+
+	// ⚠ Reject a shifted cell that leaves the playable map.
+	//
+	// Handing the engine an off-map base cell is not a cosmetic problem: it
+	// crashed the game ~960 log lines into the scenario, at a wild jump to
+	// unmapped memory, every time. Downstream code takes the base cell and
+	// looks it up without bounds-checking, so an invalid cell becomes an
+	// invalid pointer and then an invalid call.
+	//
+	// The map header gives us the playable rectangle directly (StartX/StartY/
+	// Width/Height at ScenarioClass +0x112C/+0x1130/+0x1134/+0x1138 — the same
+	// fields the preview renderer scales by). This only checks the rectangle;
+	// it does NOT yet check whether the cell is water, cliff or occupied, so a
+	// shifted spawn can still land somewhere unhelpful. But it can no longer
+	// land somewhere that does not exist.
+	const auto pScen = *reinterpret_cast<DWORD const volatile*>(AddrScenarioPtr);
+	if (pScen)
+	{
+		const int mapX = *reinterpret_cast<int const volatile*>(pScen + 0x112C);
+		const int mapY = *reinterpret_cast<int const volatile*>(pScen + 0x1130);
+		const int mapW = *reinterpret_cast<int const volatile*>(pScen + 0x1134);
+		const int mapH = *reinterpret_cast<int const volatile*>(pScen + 0x1138);
+
+		const bool inBounds = mapW > 0 && mapH > 0
+			&& newX >= mapX && newX < mapX + mapW
+			&& newY >= mapY && newY < mapY + mapH;
+
+		if (!inBounds)
+		{
+			PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" REJECTED — (%d,%d)+(%+d,%+d)=(%d,%d) "
+				"is outside the playable area x[%d,%d) y[%d,%d); left at the base cell\n",
+				pHouse, startIndex, base + 1, DirNames[ring],
+				oldX, oldY, dX, dY, newX, newY,
+				mapX, mapX + mapW, mapY, mapY + mapH);
+			return 0;
+		}
+	}
+
+	cell.Cell.X = newX;
+	cell.Cell.Y = newY;
 
 	*pHomeCell = cell.Raw;
 
