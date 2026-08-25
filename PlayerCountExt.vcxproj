@@ -75,6 +75,7 @@
     <ClCompile Include="src\SpawnConfig.cpp" />
     <ClCompile Include="src\AIRefill.cpp" />
     <ClCompile Include="src\StartPoints.cpp" />
+    <ClCompile Include="src\SpawnShift.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\PlayerCountExt.h" />
