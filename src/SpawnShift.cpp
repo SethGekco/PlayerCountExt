@@ -103,6 +103,23 @@ namespace
 	// start". Worth revisiting once it can be seen in game.
 	constexpr int ShiftDistance = 20; // built-in default; per-map overrides below
 
+	// ── DIAGNOSTIC MODE ───────────────────────────────────────────────────
+	// When false, this file OBSERVES but never writes: it still computes and
+	// logs what it would do, but leaves every engine field untouched, so a run
+	// measures genuine vanilla behaviour.
+	//
+	// Set false deliberately. Four rounds of patching assumed a model of the
+	// spawn pipeline — start index -> base cell -> placement — that the
+	// evidence has now contradicted twice over: the base cells we read sit
+	// OUTSIDE the map's playable rectangle and match no StartingPoints entry,
+	// and forcing the start index to 0 still produced a spawn at position 8.
+	// Both facts say we are writing to fields that do not drive placement.
+	//
+	// Rather than guess a fifth mechanism, establish ground truth first: run a
+	// known plain start position and see, from BaseCellTrace, which cell is
+	// written and by whom. Flip this back to true once that is known.
+	constexpr bool ApplyShift = false;
+
 	// Start positions the current map actually declares. Set from the engine's
 	// NumberStartingPoints; until we know it, assume vanilla 8 so ring maths
 	// never divides by zero.
@@ -510,6 +527,14 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	cell.Cell.X = newX;
 	cell.Cell.Y = newY;
 
+	if (!ApplyShift)
+	{
+		PlayerCountExt::Log("[shift] (diagnostic) house@0x%08X start %d = \"%d%s\" WOULD move (%d,%d) -> (%d,%d) "
+			"[%s] — not applied\n",
+			pHouse, startIndex, base + 1, DirNames[ring], oldX, oldY, newX, newY, source);
+		return 0;
+	}
+
 	*pHomeCell = cell.Raw;
 
 	// Keep +0x5494 consistent when it holds a real cell rather than the
@@ -607,10 +632,12 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 		if (current == baseIndex)
 			continue;
 
-		PlayerCountExt::Log("[shift] house[%d] start index %d -> %d (spawn.ini Multi%d = %d, base of ring %d)\n",
+		PlayerCountExt::Log("[shift] %shouse[%d] start index %d -> %d (spawn.ini Multi%d = %d, base of ring %d)\n",
+			ApplyShift ? "" : "(diagnostic, not applied) ",
 			i, current, baseIndex, i + 1, h.SpawnLocation, h.SpawnLocation / RealStartCount);
 
-		*pStart = baseIndex;
+		if (ApplyShift)
+			*pStart = baseIndex;
 	}
 
 	return 0;
