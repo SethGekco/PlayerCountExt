@@ -128,6 +128,41 @@ namespace
 	// The engine's start-cell table, captured at 0x5D6C1D (see there).
 	DWORD CachedCellTable = 0;
 
+	// Base cells already taken this pass, so a second house on the same
+	// position is bumped to the next ring instead of sharing a cell.
+	// Reset once per AssignHouses pass (see the 0x688378 hook).
+	constexpr int MaxClaims = 64;
+	DWORD ClaimedCells[MaxClaims] {};
+	int ClaimCount = 0;
+
+	bool IsClaimed(DWORD raw)
+	{
+		for (int i = 0; i < ClaimCount; ++i)
+			if (ClaimedCells[i] == raw)
+				return true;
+		return false;
+	}
+
+	void Claim(DWORD raw)
+	{
+		if (ClaimCount < MaxClaims)
+			ClaimedCells[ClaimCount++] = raw;
+	}
+
+	// Which base position does this cell correspond to? -1 if it is not one of
+	// the map's own start cells.
+	int BaseIndexOfCell(DWORD raw)
+	{
+		if (!CachedCellTable)
+			return -1;
+
+		const auto table = reinterpret_cast<const DWORD*>(CachedCellTable);
+		for (int i = 0; i < RealStartCount; ++i)
+			if (table[i] == raw)
+				return i;
+		return -1;
+	}
+
 	constexpr int OffNumberStartingPoints = 0x113C;
 	constexpr DWORD AddrScenarioPtr = 0xA8B230;
 
@@ -398,55 +433,94 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	if (RealStartCount <= 0)
 		return 0;
 
-	// The player's real choice. The house's own +0x16058 is unusable here: the
-	// spawner clamps it, and when two houses resolve to the same base the engine
-	// relocates one of them to a free position outright.
-	const int startIndex = StartIndexFromSpawnIni(pHouse);
-	if (startIndex < 0)
-		return 0;
-
-	const int ring = startIndex / RealStartCount;
-	const int base = startIndex % RealStartCount;
-
+	const auto table = reinterpret_cast<const DWORD*>(CachedCellTable);
 	const auto pHomeCell = reinterpret_cast<DWORD*>(pHouse + 0x5490);
 
 	PackedCell had;
 	had.Raw = *pHomeCell;
 
-	// Ring 0 keeps the engine's own answer. We only claim authority over
-	// positions the map does not have.
-	if (ring == 0 || ring >= RingCount)
-		return 0;
+	// Where does this house want to be?
+	//
+	// If spawn.ini names a position, that is the player's explicit choice. If
+	// not — which is the normal case for AI, and for every house past the
+	// map's own count — fall back to whatever the engine assigned and work out
+	// which base position that is.
+	int startIndex = StartIndexFromSpawnIni(pHouse);
 
-	// This is the LAST writer, which is the whole point of doing it here.
-	// 0x5D6C2A assigns explicit starts, then this path runs for every house and
-	// overwrites — so anything written earlier is discarded. Overriding after
-	// the engine has finished also means we never have to prevent it from
-	// relocating a house, which is what made two houses on one base collide.
-	PackedCell cell;
-	cell.Raw = reinterpret_cast<const DWORD*>(CachedCellTable)[base];
+	if (startIndex < 0)
+	{
+		const int engineBase = BaseIndexOfCell(had.Raw);
+		if (engineBase < 0)
+			return 0;   // not on a start cell at all; leave it alone
+		startIndex = engineBase;
+	}
 
+	int ring = startIndex / RealStartCount;
+	const int base = startIndex % RealStartCount;
+
+	// ── More houses than positions ──────────────────────────────────────
+	// The engine allows one house per start, and with the deficiency search
+	// suppressed a surplus house simply gets no position — it spawns nothing
+	// and is out immediately, which presents as "the extra player never
+	// showed up".
+	//
+	// So if this base cell is already taken, bump the house to the next ring
+	// of the SAME base until a free (base, ring) is found. Deterministic:
+	// houses are processed in array order and the search is a plain ascending
+	// scan, so every client reaches the same answer.
+	PackedCell target;
 	int dX = 0, dY = 0;
 	const char* source = "built-in default";
-	ResolveOffset(base, ring, dX, dY, source);
+	bool bumped = false;
 
-	const short baseX = cell.Cell.X;
-	const short baseY = cell.Cell.Y;
+	while (true)
+	{
+		if (ring == 0)
+		{
+			target.Raw = table[base];
+			dX = dY = 0;
+		}
+		else if (ring < RingCount)
+		{
+			target.Raw = table[base];
+			ResolveOffset(base, ring, dX, dY, source);
+			target.Cell.X = static_cast<short>(target.Cell.X + dX);
+			target.Cell.Y = static_cast<short>(target.Cell.Y + dY);
+		}
+		else
+		{
+			PlayerCountExt::Log("[shift] house@0x%08X — no free ring left for base %d; leaving engine placement\n",
+				pHouse, base + 1);
+			return 0;
+		}
 
-	cell.Cell.X = static_cast<short>(baseX + dX);
-	cell.Cell.Y = static_cast<short>(baseY + dY);
+		if (!IsClaimed(target.Raw))
+			break;
 
-	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — engine had (%d,%d); "
-		"base %d is (%d,%d) + (%+d,%+d) -> (%d,%d)  [%s]%s\n",
-		pHouse, startIndex, base + 1, DirNames[ring],
-		had.Cell.X, had.Cell.Y, base + 1, baseX, baseY, dX, dY,
-		cell.Cell.X, cell.Cell.Y, source,
+		++ring;
+		bumped = true;
+	}
+
+	Claim(target.Raw);
+
+	if (ring == 0)
+	{
+		// Unshifted and unclaimed — the engine's own answer stands.
+		return 0;
+	}
+
+	PlayerCountExt::Log("[shift] house@0x%08X -> \"%d%s\"%s — engine had (%d,%d); base %d (%d,%d) + (%+d,%+d) = (%d,%d)  [%s]%s\n",
+		pHouse, base + 1, DirNames[ring],
+		bumped ? " (bumped: base was taken)" : "",
+		had.Cell.X, had.Cell.Y, base + 1,
+		PackedCell{ table[base] }.Cell.X, PackedCell{ table[base] }.Cell.Y,
+		dX, dY, target.Cell.X, target.Cell.Y, source,
 		ApplyShift ? "" : "  (diagnostic, not applied)");
 
 	if (!ApplyShift)
 		return 0;
 
-	*pHomeCell = cell.Raw;
+	*pHomeCell = target.Raw;
 
 	// Keep +0x5494 in step when it holds a real cell rather than the
 	// invalid-cell sentinel, so both getters (0x50DEF0 / 0x50DF30) agree.
@@ -456,13 +530,17 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	const short sentX = *reinterpret_cast<short const volatile*>(0xA8EF98);
 	const short sentY = *reinterpret_cast<short const volatile*>(0xA8EF9A);
 	if (!(cur.Cell.X == sentX && cur.Cell.Y == sentY))
-		*pCurCell = cell.Raw;
+		*pCurCell = target.Raw;
 
 	return 0;
 }
 
 DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 {
+	// One pass per AssignHouses call, and this runs before the 0x5D6D3F loop,
+	// so it is the right place to clear the claimed-cell table.
+	ClaimCount = 0;
+
 	auto& spawn = PlayerCountExt::SpawnConfig::Get();
 	if (!spawn.Loaded())
 		return 0;
