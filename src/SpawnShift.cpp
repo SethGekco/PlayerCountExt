@@ -22,24 +22,26 @@
 *  starts from a 4-start map, comfortably past the ~30-house engine ceiling, so
 *  the ceiling stays the binding limit rather than the map.
 *
-*  WHERE
-*  -----
-*  0x5D6C21 is the single instruction that turns a house's start index into a
-*  cell, once per house per game:
+*  WHERE — and why it is not the obvious place
+*  -------------------------------------------
+*  TWO paths assign a house's base cell, and which one runs depends on whether
+*  the player picked a start position or left it on Random:
 *
-*      5d6c12:  mov  0x16058(%ecx),%esi      ; ESI = house->StartIndex
-*      5d6c1d:  mov  0xc(%esp),%eax          ; EAX = cell table
-*      5d6c21:  mov  (%eax,%esi,4),%edx      ; EDX = table[startIndex]
-*      5d6c24:  push %edx
-*      5d6c25:  call 0x50e000                ; house->SetBaseCell(EDX)
+*      0x5D6C21 -> SetBaseCell    explicit starts only  (returns to 0x5D6C2A)
+*      0x5D6D3A -> SetBaseCell    EVERY house, later    (returns to 0x5D6D3F)
 *
-*  We hook 0x5D6C1D (7 bytes, both movs) and return to the intact `push %edx`,
-*  having set EDX ourselves. Nothing downstream — placement, the parser,
-*  StartingPoints — needs to change.
+*  The second runs last and overwrites the first — 16 calls against 3 in a
+*  traced game. So the shift is applied at 0x5D6D3F, after the engine has
+*  finished assigning. 0x5D6C1D is hooked only to capture the engine's
+*  start-cell table, which is a stack argument exposed nowhere else and is NOT
+*  ScenarioClass::StartingPoints (those held (222,145)... while the cells
+*  actually assigned were (111,178), (35,102), ...).
 *
-*  NOTE the field is +0x16058, NOT +0x1605C. Both exist and are written by
-*  AssignHouses; +0x1605C drives the auto-ally pass at 0x5D74AF instead. Using
-*  the wrong one moves the wrong thing.
+*  We do NOT write the house's start index (+0x16058). HouseIndices[start] =
+*  house allows one house per start, so pointing two houses at the same index
+*  makes the engine relocate one to a free position — which presents as "my
+*  start selection was ignored". Overriding the resulting cell needs no
+*  cooperation from the engine and cannot collide.
 *
 *  DETERMINISM
 *  -----------
@@ -48,11 +50,15 @@
 *  there is no desync surface at all. Deliberately not "random direction from the
 *  synced seed", which would also work but has a failure mode this does not.
 *
-*  ⚠ NOT YET ADDRESSED (both known, neither fatal to testing):
-*    - Terrain: the offset cell may be water, cliff or off-map. There is no
-*      validity search yet, so a shifted house can land somewhere unusable.
-*    - The auto-ally pass at 0x5D74AF allies houses sharing +0x1605C. Houses
-*      shifted onto the same base position may therefore start allied.
+*  ⚠ NOT YET ADDRESSED:
+*    - Terrain: the target cell is not validated, so a shifted house can land on
+*      water, a cliff, or an occupied cell. Note the map header rectangle
+*      (StartX/Width...) CANNOT be used for this — it is not cell space; a check
+*      built on it rejected every valid spawn on the test map.
+*    - The auto-ally pass at 0x5D74AF allies houses sharing +0x1605C, so houses
+*      derived from the same base position may start allied.
+*    - 0x007398D3 writes base cells again shortly after us, offset (-1,-1).
+*      Harmless so far; unconfirmed what it is for.
 *
 *  GPLv3.
 */
@@ -105,19 +111,13 @@ namespace
 
 	// ── DIAGNOSTIC MODE ───────────────────────────────────────────────────
 	// When false, this file OBSERVES but never writes: it still computes and
-	// logs what it would do, but leaves every engine field untouched, so a run
+	// logs what it would do, leaving every engine field untouched, so a run
 	// measures genuine vanilla behaviour.
 	//
-	// Set false deliberately. Four rounds of patching assumed a model of the
-	// spawn pipeline — start index -> base cell -> placement — that the
-	// evidence has now contradicted twice over: the base cells we read sit
-	// OUTSIDE the map's playable rectangle and match no StartingPoints entry,
-	// and forcing the start index to 0 still produced a spawn at position 8.
-	// Both facts say we are writing to fields that do not drive placement.
-	//
-	// Rather than guess a fifth mechanism, establish ground truth first: run a
-	// known plain start position and see, from BaseCellTrace, which cell is
-	// written and by whom. Flip this back to true once that is known.
+	// Keep this switch. Setting it false is what finally separated our own
+	// crashes from a pre-existing one (ours died ~960 debug.log lines in,
+	// the other after 850,000), and it is the fastest way to answer "is this
+	// us?" without reasoning about it.
 	constexpr bool ApplyShift = true;
 
 	// Start positions the current map actually declares. Set from the engine's
