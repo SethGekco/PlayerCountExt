@@ -125,6 +125,9 @@ namespace
 	// never divides by zero.
 	int RealStartCount = 8;
 
+	// The engine's start-cell table, captured at 0x5D6C1D (see there).
+	DWORD CachedCellTable = 0;
+
 	constexpr int OffNumberStartingPoints = 0x113C;
 	constexpr DWORD AddrScenarioPtr = 0xA8B230;
 
@@ -339,82 +342,29 @@ namespace
 #define PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH 1
 #if PLAYERCOUNTEXT_SPAWNSHIFT_DEAD_PATH
 
-DEFINE_HOOK(0x5D6C1D, PlayerCountExt_SpawnShift_IndexToCell, 0x7)
+DEFINE_HOOK(0x5D6C1D, PlayerCountExt_SpawnShift_CacheTable, 0x7)
 {
-	GET(int, engineIndex, ESI);      // the (possibly clamped) index the engine has
-	GET(DWORD, pHouse, ECX);
-	GET_STACK(DWORD, pTable, 0xC);   // the engine's own cell table
+	GET(int, engineIndex, ESI);
+	GET_STACK(DWORD, pTable, 0xC);
 
-	// Stolen instruction #1. Must happen whatever we decide, because 0x5D6C2F
-	// reuses EAX.
+	// Stolen instruction. 0x5D6C2F reuses EAX, so this must always happen.
 	R->EAX(pTable);
 
-	const auto table = reinterpret_cast<const DWORD*>(pTable);
+	// Cache the engine's authoritative start-cell table.
+	//
+	// This is the ONLY place it is exposed: it arrives as a stack argument and
+	// is not ScenarioClass::StartingPoints (those held (222,145)... while the
+	// real spawn cells on the same map are (111,178), (35,102), ...). We need
+	// it later, at 0x5D6D3F, to compute "the cell of base position N".
+	//
+	// We deliberately do NOT modify anything here any more. Writing a shifted
+	// cell at this point is pointless — 0x5D6D3F runs afterwards for every
+	// house and overwrites it — and forcing ESI to the base index made two
+	// houses claim the same start, which is what caused the engine to relocate
+	// one of them to a free position.
+	CachedCellTable = pTable;
 
-	RefreshRealStartCount();
-
-	// The player's real choice, not the spawner's clamped copy.
-	int startIndex = StartIndexFromSpawnIni(pHouse);
-	if (startIndex < 0)
-		startIndex = engineIndex;
-
-	if (startIndex < 0 || RealStartCount <= 0)
-	{
-		R->EDX(table[engineIndex < 0 ? 0 : engineIndex]);
-		return 0x5D6C24;
-	}
-
-	const int ring = startIndex / RealStartCount;
-	const int base = startIndex % RealStartCount;
-
-	// Take the cell of the BASE position, not of whatever index the engine
-	// currently holds. Shifting from the clamped cell would move the house
-	// relative to the wrong spawn — it is the difference between "20 north of
-	// spawn 1" and "20 north of wherever the clamp landed".
-	PackedCell cell;
-	cell.Raw = table[base];
-
-	// Keep the engine's own bookkeeping consistent: 0x5D6C2F does
-	// `mov %edi,0x1180(%eax,%esi,4)`, i.e. HouseIndices[ESI] = house. Point it
-	// at the base position so the start->house table records something real.
-	R->ESI(base);
-
-	if (ring == 0 || ring >= RingCount)
-	{
-		if (ring >= RingCount)
-			PlayerCountExt::Log("[shift] start %d exceeds ring table (%d rings x %d starts) — using base %d\n",
-				startIndex, RingCount, RealStartCount, base + 1);
-		else
-			PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 — base %d cell (%d,%d)\n",
-				pHouse, startIndex, base + 1, cell.Cell.X, cell.Cell.Y);
-
-		R->EDX(cell.Raw);
-		return 0x5D6C24;
-	}
-
-	int dX = 0, dY = 0;
-	const char* source = "built-in default";
-	ResolveOffset(base, ring, dX, dY, source);
-
-	const short oldX = cell.Cell.X;
-	const short oldY = cell.Cell.Y;
-
-	// NOTE: no map-bounds check here. An earlier revision rejected shifts using
-	// the header rectangle (StartX/StartY/Width/Height), but those fields are
-	// NOT in cell-coordinate space: every genuine spawn cell on the test map
-	// (X between 35 and 178) fell outside the header's x[206,305), so the check
-	// rejected perfectly valid positions. Validating the target needs a real
-	// cell lookup, not that rectangle. Until then a shift can still land
-	// somewhere unhelpful — but it is no longer blocked for a bogus reason.
-	cell.Cell.X = static_cast<short>(oldX + dX);
-	cell.Cell.Y = static_cast<short>(oldY + dY);
-
-	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — base %d cell (%d,%d) + (%+d,%+d) = (%d,%d)  [%s]%s\n",
-		pHouse, startIndex, base + 1, DirNames[ring], base + 1,
-		oldX, oldY, dX, dY, cell.Cell.X, cell.Cell.Y, source,
-		ApplyShift ? "" : "  (diagnostic, not applied)");
-
-	R->EDX(ApplyShift ? cell.Raw : table[base]);
+	R->EDX(reinterpret_cast<const DWORD*>(pTable)[engineIndex < 0 ? 0 : engineIndex]);
 	return 0x5D6C24;
 }
 
@@ -441,169 +391,76 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 {
 	GET(DWORD, pHouse, EDI);
 
-	if (!pHouse)
+	if (!pHouse || !CachedCellTable)
 		return 0;
 
 	RefreshRealStartCount();
+	if (RealStartCount <= 0)
+		return 0;
 
-	// Do NOT trust HouseClass+0x16058 here.
-	//
-	// The CnCNet spawner clamps spawn locations to 0..7, and it does so AFTER
-	// AssignHouses — proven in game: our restore at the AssignHouses epilogue
-	// saw the field as 0 and set it to 8, yet by the time this hook runs the
-	// same house reads 7. Restoring it earlier or later is a race against
-	// another DLL's write order, which is not a fight worth having.
-	//
-	// spawn.ini is host-authoritative and immutable once written, so we read
-	// the player's actual choice from there instead. The house's position in
-	// HouseClass::Array gives us its MultiN slot (1-based).
+	// The player's real choice. The house's own +0x16058 is unusable here: the
+	// spawner clamps it, and when two houses resolve to the same base the engine
+	// relocates one of them to a free position outright.
 	const int startIndex = StartIndexFromSpawnIni(pHouse);
-
-	if (startIndex < 0 || RealStartCount <= 0)
+	if (startIndex < 0)
 		return 0;
 
 	const int ring = startIndex / RealStartCount;
 	const int base = startIndex % RealStartCount;
 
-	// +0x5490 is the cell 0x50E000 just wrote (the getters fall back to it when
-	// +0x5494 is the invalid-cell sentinel).
 	const auto pHomeCell = reinterpret_cast<DWORD*>(pHouse + 0x5490);
 
+	PackedCell had;
+	had.Raw = *pHomeCell;
+
+	// Ring 0 keeps the engine's own answer. We only claim authority over
+	// positions the map does not have.
+	if (ring == 0 || ring >= RingCount)
+		return 0;
+
+	// This is the LAST writer, which is the whole point of doing it here.
+	// 0x5D6C2A assigns explicit starts, then this path runs for every house and
+	// overwrites — so anything written earlier is discarded. Overriding after
+	// the engine has finished also means we never have to prevent it from
+	// relocating a house, which is what made two houses on one base collide.
 	PackedCell cell;
-	cell.Raw = *pHomeCell;
-
-	if (ring == 0)
-	{
-		const auto pS = *reinterpret_cast<DWORD const volatile*>(AddrScenarioPtr);
-		if (pS)
-			PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 (realCount=%d) — unshifted, cell (%d,%d); "
-				"map x[%d,%d) y[%d,%d)\n",
-				pHouse, startIndex, RealStartCount, cell.Cell.X, cell.Cell.Y,
-				*reinterpret_cast<int const volatile*>(pS + 0x112C),
-				*reinterpret_cast<int const volatile*>(pS + 0x112C) + *reinterpret_cast<int const volatile*>(pS + 0x1134),
-				*reinterpret_cast<int const volatile*>(pS + 0x1130),
-				*reinterpret_cast<int const volatile*>(pS + 0x1130) + *reinterpret_cast<int const volatile*>(pS + 0x1138));
-		else
-			PlayerCountExt::Log("[shift] house@0x%08X start %d ring0 (realCount=%d) — unshifted, cell (%d,%d)\n",
-				pHouse, startIndex, RealStartCount, cell.Cell.X, cell.Cell.Y);
-		return 0;
-	}
-
-	if (ring >= RingCount)
-	{
-		PlayerCountExt::Log("[shift] house@0x%08X start %d exceeds ring table (%d rings x %d starts) — left unshifted\n",
-			pHouse, startIndex, RingCount, RealStartCount);
-		return 0;
-	}
+	cell.Raw = reinterpret_cast<const DWORD*>(CachedCellTable)[base];
 
 	int dX = 0, dY = 0;
 	const char* source = "built-in default";
 	ResolveOffset(base, ring, dX, dY, source);
 
-	const short oldX = cell.Cell.X;
-	const short oldY = cell.Cell.Y;
+	const short baseX = cell.Cell.X;
+	const short baseY = cell.Cell.Y;
 
-	const short newX = static_cast<short>(oldX + dX);
-	const short newY = static_cast<short>(oldY + dY);
+	cell.Cell.X = static_cast<short>(baseX + dX);
+	cell.Cell.Y = static_cast<short>(baseY + dY);
 
-	// ⚠ Reject a shifted cell that leaves the playable map.
-	//
-	// Handing the engine an off-map base cell is not a cosmetic problem: it
-	// crashed the game ~960 log lines into the scenario, at a wild jump to
-	// unmapped memory, every time. Downstream code takes the base cell and
-	// looks it up without bounds-checking, so an invalid cell becomes an
-	// invalid pointer and then an invalid call.
-	//
-	// The map header gives us the playable rectangle directly (StartX/StartY/
-	// Width/Height at ScenarioClass +0x112C/+0x1130/+0x1134/+0x1138 — the same
-	// fields the preview renderer scales by). This only checks the rectangle;
-	// it does NOT yet check whether the cell is water, cliff or occupied, so a
-	// shifted spawn can still land somewhere unhelpful. But it can no longer
-	// land somewhere that does not exist.
-	const auto pScen = *reinterpret_cast<DWORD const volatile*>(AddrScenarioPtr);
-	if (pScen)
-	{
-		const int mapX = *reinterpret_cast<int const volatile*>(pScen + 0x112C);
-		const int mapY = *reinterpret_cast<int const volatile*>(pScen + 0x1130);
-		const int mapW = *reinterpret_cast<int const volatile*>(pScen + 0x1134);
-		const int mapH = *reinterpret_cast<int const volatile*>(pScen + 0x1138);
-
-		const bool inBounds = mapW > 0 && mapH > 0
-			&& newX >= mapX && newX < mapX + mapW
-			&& newY >= mapY && newY < mapY + mapH;
-
-		if (!inBounds)
-		{
-			PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" REJECTED — (%d,%d)+(%+d,%+d)=(%d,%d) "
-				"is outside the playable area x[%d,%d) y[%d,%d); left at the base cell\n",
-				pHouse, startIndex, base + 1, DirNames[ring],
-				oldX, oldY, dX, dY, newX, newY,
-				mapX, mapX + mapW, mapY, mapY + mapH);
-			return 0;
-		}
-	}
-
-	cell.Cell.X = newX;
-	cell.Cell.Y = newY;
+	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — engine had (%d,%d); "
+		"base %d is (%d,%d) + (%+d,%+d) -> (%d,%d)  [%s]%s\n",
+		pHouse, startIndex, base + 1, DirNames[ring],
+		had.Cell.X, had.Cell.Y, base + 1, baseX, baseY, dX, dY,
+		cell.Cell.X, cell.Cell.Y, source,
+		ApplyShift ? "" : "  (diagnostic, not applied)");
 
 	if (!ApplyShift)
-	{
-		PlayerCountExt::Log("[shift] (diagnostic) house@0x%08X start %d = \"%d%s\" WOULD move (%d,%d) -> (%d,%d) "
-			"[%s] — not applied\n",
-			pHouse, startIndex, base + 1, DirNames[ring], oldX, oldY, newX, newY, source);
 		return 0;
-	}
 
 	*pHomeCell = cell.Raw;
 
-	// Keep +0x5494 consistent when it holds a real cell rather than the
-	// invalid-cell sentinel, so both getters agree.
+	// Keep +0x5494 in step when it holds a real cell rather than the
+	// invalid-cell sentinel, so both getters (0x50DEF0 / 0x50DF30) agree.
 	const auto pCurCell = reinterpret_cast<DWORD*>(pHouse + 0x5494);
-	if (*pCurCell == *pHomeCell || *pCurCell != 0)
-	{
-		PackedCell cur;
-		cur.Raw = *pCurCell;
-		const short sentX = *reinterpret_cast<short const volatile*>(0xA8EF98);
-		const short sentY = *reinterpret_cast<short const volatile*>(0xA8EF9A);
-		if (!(cur.Cell.X == sentX && cur.Cell.Y == sentY))
-		{
-			// Same resolved offset as the home cell, so the two stay in step.
-			cur.Cell.X = static_cast<short>(cur.Cell.X + dX);
-			cur.Cell.Y = static_cast<short>(cur.Cell.Y + dY);
-			*pCurCell = cur.Raw;
-		}
-	}
-
-	static const char* const Suffix[] = { "", "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
-	PlayerCountExt::Log("[shift] house@0x%08X start %d = \"%d%s\" — (%d,%d) + (%+d,%+d) = (%d,%d)  [%s]\n",
-		pHouse, startIndex, base + 1, Suffix[ring],
-		oldX, oldY, dX, dY, cell.Cell.X, cell.Cell.Y, source);
+	PackedCell cur;
+	cur.Raw = *pCurCell;
+	const short sentX = *reinterpret_cast<short const volatile*>(0xA8EF98);
+	const short sentY = *reinterpret_cast<short const volatile*>(0xA8EF9A);
+	if (!(cur.Cell.X == sentX && cur.Cell.Y == sentY))
+		*pCurCell = cell.Raw;
 
 	return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Restore the unclamped start index — AssignHouses epilogue, 0x688378.
-//
-// The CnCNet spawner clamps spawn locations to 0..7 before the engine sees
-// them (`std::clamp(nSpawnLocations, 0, 7)` in its Spawner.cpp), so a shifted
-// selection of 8 arrives as 7 — i.e. "1N" silently becomes "spawn 8". Proven
-// in game: spawn.ini carried [SpawnLocations] Multi1=8 while the house's
-// +0x16058 read 7.
-//
-// We cannot fix the spawner from here — it is a separate binary — but we do not
-// need to. spawn.ini is host-authoritative and we already parse it, so we
-// simply write the value the player actually chose back over the clamped one,
-// after AssignHouses has finished populating the house array.
-//
-// Mapping: [SpawnLocations] MultiN is 1-based over the house array, so
-// house[i] takes Multi(i+1). Confirmed by the same run: Multi1 corresponded to
-// house[0].
-//
-// This runs at the AssignHouses epilogue, which is also hooked for
-// instrumentation. Same-address hooks CHAIN in Syringe (unlike overlapping
-// ones, which corrupt each other), and both handlers return 0, so this is safe.
-// ---------------------------------------------------------------------------
 DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 {
 	auto& spawn = PlayerCountExt::SpawnConfig::Get();
@@ -655,8 +512,14 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 			ApplyShift ? "" : "(diagnostic, not applied) ",
 			i, current, baseIndex, i + 1, h.SpawnLocation, h.SpawnLocation / RealStartCount);
 
-		if (ApplyShift)
-			*pStart = baseIndex;
+		// Deliberately NOT written any more.
+		//
+		// Forcing +0x16058 to the base made two houses claim the same start
+		// position, and the engine responded by relocating one of them to a
+		// free spot — the "I filled an available slot" symptom. The engine is
+		// now left to assign whatever it likes; we override the resulting CELL
+		// at 0x5D6D3F instead, which needs no cooperation from it.
+		(void)baseIndex;
 	}
 
 	return 0;
