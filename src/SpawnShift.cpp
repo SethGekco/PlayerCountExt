@@ -524,3 +524,64 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 
 	return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Suppress the engine's "start waypoint deficiency" search — 0x688508.
+//
+// With more houses than the map has start positions, the engine logs
+//
+//     Multiplayer start waypoint deficiency - looking for more start positions
+//
+// and then tries to INVENT the missing positions by scanning the map
+// (0x6885B5 -> MapClass at 0x56DC20). In a 9-house game on an 8-start map that
+// search does not come back: sampling the process showed the main thread
+// spinning in 0x56E838 / 0x57854E with every other thread idle, and the game
+// sitting on a black screen indefinitely.
+//
+// We do not need it. A shifted start ("1N") already supplies a real, distinct
+// cell for the extra house, so the deficiency the engine is trying to solve has
+// already been solved by the time it looks.
+//
+//     688502:  jle  0x68864d      ; vanilla "no deficiency" exit
+//     688508:  push $0x83dcd4     ; <- we hook here, 5 bytes
+//     ...
+//     68864d:  xor  %eax,%eax     ; normal continuation
+//
+// Returning 0x68864D takes exactly the branch vanilla takes when no houses are
+// short, which is why it is safe: it is not a novel path.
+//
+// ⚠ GATED. This only fires when spawn.ini actually uses a shifted start. If a
+// map is genuinely short of positions and nothing is supplying them, the search
+// is the correct behaviour and is left alone — suppressing it unconditionally
+// would trade a hang for houses stacked on one cell.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x688508, PlayerCountExt_SpawnShift_SuppressDeficiencySearch, 0x5)
+{
+	auto& spawn = PlayerCountExt::SpawnConfig::Get();
+	if (!spawn.Loaded())
+		return 0;
+
+	RefreshRealStartCount();
+	if (RealStartCount <= 0)
+		return 0;
+
+	// Is any house using a start position beyond what the map declares?
+	bool usingShiftedStarts = false;
+	for (int n = 1; n <= spawn.HighestDefined(); ++n)
+	{
+		const auto& h = spawn.House(n);
+		if (h.Defined && h.SpawnLocation >= RealStartCount)
+		{
+			usingShiftedStarts = true;
+			break;
+		}
+	}
+
+	if (!usingShiftedStarts)
+		return 0; // vanilla behaviour — let the engine search
+
+	PlayerCountExt::Log("[shift] suppressing the engine's start-position search "
+		"(shifted starts already supply the extra positions; the search does not terminate)\n");
+
+	return 0x68864D;
+}
