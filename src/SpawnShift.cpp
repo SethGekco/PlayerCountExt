@@ -775,38 +775,60 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 // Returning 0x68864D takes exactly the branch vanilla takes when no houses are
 // short, which is why it is safe: it is not a novel path.
 //
-// ⚠ GATED. This only fires when spawn.ini actually uses a shifted start. If a
-// map is genuinely short of positions and nothing is supplying them, the search
-// is the correct behaviour and is left alone — suppressing it unconditionally
-// would trade a hang for houses stacked on one cell.
+// ⚠ GATED, on house count vs position count.
+//
+// An earlier gate asked whether spawn.ini NAMED a shifted start ("1N"), which
+// was the wrong question and hung the game. With every player on Random every
+// Multi carries start=-1, so no explicit shifted start exists, the gate stayed
+// shut, and the engine ran its search anyway — 9 houses on a 2-position map,
+// spinning at 100% forever. Suppression is needed MOST in the case that gate
+// excluded.
+//
+// The right question is whether the shift will supply the missing positions,
+// and it does so whenever there are more playing houses than start positions,
+// no matter how those houses were assigned. That is also exactly the condition
+// under which the engine reaches this code at all (0x688502 jle skips it
+// otherwise), so the two agree by construction.
+//
+// If the shift is compiled out we leave the search alone: it would then be the
+// only thing supplying positions, and a hang beats no spawns at all.
 // ---------------------------------------------------------------------------
 DEFINE_HOOK(0x688508, PlayerCountExt_SpawnShift_SuppressDeficiencySearch, 0x5)
 {
-	auto& spawn = PlayerCountExt::SpawnConfig::Get();
-	if (!spawn.Loaded())
-		return 0;
+	if (!ApplyShift)
+		return 0; // the shift is compiled out, so nothing else supplies positions
 
 	RefreshRealStartCount();
 	if (RealStartCount <= 0)
 		return 0;
 
-	// Is any house using a start position beyond what the map declares?
-	bool usingShiftedStarts = false;
-	for (int n = 1; n <= spawn.HighestDefined(); ++n)
+	// Count houses that actually need a start position. Neutral and Special are
+	// in HouseClass::Array but have none by design, so counting them would
+	// overstate the shortfall — same HouseTypeClass + 0x1A6 test the shift uses.
+	const auto pArrayItems = *reinterpret_cast<DWORD* const volatile*>(AddrHouseArrayItems);
+	const int arrayCount = *reinterpret_cast<int const volatile*>(AddrHouseArrayCount);
+
+	int playing = 0;
+	if (pArrayItems)
 	{
-		const auto& h = spawn.House(n);
-		if (h.Defined && h.SpawnLocation >= RealStartCount)
+		for (int i = 0; i < arrayCount; ++i)
 		{
-			usingShiftedStarts = true;
-			break;
+			const DWORD pHouse = pArrayItems[i];
+			if (!pHouse)
+				continue;
+
+			const auto pType = *reinterpret_cast<DWORD const volatile*>(pHouse + 0x34);
+			if (pType && !*reinterpret_cast<BYTE const volatile*>(pType + 0x1A6))
+				++playing;
 		}
 	}
 
-	if (!usingShiftedStarts)
-		return 0; // vanilla behaviour — let the engine search
+	if (playing <= RealStartCount)
+		return 0; // no real shortfall — vanilla behaviour
 
-	PlayerCountExt::Log("[shift] suppressing the engine's start-position search "
-		"(shifted starts already supply the extra positions; the search does not terminate)\n");
+	PlayerCountExt::Log("[shift] suppressing the engine's start-position search: "
+		"%d playing houses vs %d start positions, and the shift supplies the rest "
+		"(the search does not terminate)\n", playing, RealStartCount);
 
 	return 0x68864D;
 }
