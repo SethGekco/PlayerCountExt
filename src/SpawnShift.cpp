@@ -588,12 +588,21 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	// Otherwise (or if even distance 1 was unusable): try later rings of this
 	// base, then every other base. Only reached for houses with no choice of
 	// their own, or when the chosen direction is entirely unusable.
-	for (int attempt = 0; attempt < RealStartCount && !found; ++attempt)
+	// RING-MAJOR, deliberately: every real start position is offered before any
+	// shifted one.
+	//
+	// Shifted positions are an OVERFLOW mechanism, not part of the normal pool.
+	// A base-major search (all rings of base 1, then base 2...) could hand a
+	// player a shifted slot on base 1 while base 2's real spawn sat empty,
+	// which is strictly worse for that player and for map balance. Sweeping
+	// ring 0 across every base first means shifted slots only ever appear once
+	// the map genuinely has more houses than positions.
+	for (int tryRing = 0; tryRing < RingCount && !found; ++tryRing)
 	{
-		const int tryBase = (base + attempt) % RealStartCount;
-
-		for (int tryRing = (attempt == 0 ? ring : 0); tryRing < RingCount; ++tryRing)
+		for (int attempt = 0; attempt < RealStartCount && !found; ++attempt)
 		{
+			const int tryBase = (base + attempt) % RealStartCount;
+
 			PackedCell candidate;
 			candidate.Raw = table[tryBase];
 			int cdX = 0, cdY = 0;
