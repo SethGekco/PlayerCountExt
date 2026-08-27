@@ -538,6 +538,11 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	PackedCell had;
 	had.Raw = *pHomeCell;
 
+	// One probe per pass: is there terrain under the cells at this point? The
+	// reachability check can only live here if there is. Read-only.
+	if (ClaimCount == 0)
+		PlayerCountExt::ProbeCellTerrain("at spawn assignment (0x5D6D3F)", had.Raw);
+
 	// Where does this house want to be?
 	//
 	// If spawn.ini names a position, that is the player's explicit choice. If

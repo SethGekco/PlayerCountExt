@@ -297,3 +297,79 @@ DEFINE_HOOK(0x688378, PlayerCountExt_AssignHouses_Exit, 0x5)
 
 	return 0; // continue original code
 }
+
+// ---------------------------------------------------------------------------
+// Is there terrain under a cell yet?  (read-only)
+//
+// Settles a question the crash dump could not. At the moment of a mid-setup
+// crash, cell OBJECTS existed for all 12,720 valid cells of an 80x80 map, each
+// with MapCoords set — but every terrain-ish field was empty. That is equally
+// consistent with "terrain loads later in setup" and with "that failed run
+// never got that far", and the difference decides where the reachability check
+// can live. A successful run answers it.
+//
+// THE ACCESS MODEL, which is easy to get wrong:
+//   [MapClass+0x13C] is a POINTER array, not a flat object array. The engine's
+//   own population routine reads it as `mov ecx,[edx+edi*4]` (0x5663BC) and
+//   allocates cells lazily. Reading it as a flat array of 0x148-byte objects
+//   yields zeros everywhere, which is indistinguishable from "unpopulated" —
+//   that mistake cost a wrong conclusion once already.
+//
+//   The row stride is NOT reliably 512: MapSizeExt rescales it, and this
+//   install runs at 2048. [MapClass+0x140] holds the cell-count bound, so the
+//   stride is derived from it rather than assumed.
+// ---------------------------------------------------------------------------
+void PlayerCountExt::ProbeCellTerrain(const char* where, DWORD rawCell)
+{
+	constexpr DWORD AddrMapClass = 0x87F7E8;
+
+	const DWORD arrayBase = *reinterpret_cast<DWORD const volatile*>(AddrMapClass + 0x13C);
+	const DWORD bound     = *reinterpret_cast<DWORD const volatile*>(AddrMapClass + 0x140);
+
+	if (!arrayBase || !bound)
+	{
+		PlayerCountExt::Log("[cell] %s: no cell array yet (base=0x%08X bound=%u)\n",
+			where, arrayBase, bound);
+		return;
+	}
+
+	// bound == stride * stride, so recover the shift rather than assuming 9.
+	int shift = 0;
+	while ((1u << (2 * (shift + 1))) <= bound && shift < 15)
+		++shift;
+
+	union { DWORD raw; struct { short X, Y; } c; } cell{ rawCell };
+	const DWORD index = (static_cast<DWORD>(cell.c.Y) << shift) + static_cast<DWORD>(cell.c.X);
+	if (index >= bound)
+	{
+		PlayerCountExt::Log("[cell] %s: (%d,%d) index %u out of bound %u (stride 1<<%d)\n",
+			where, cell.c.X, cell.c.Y, index, bound, shift);
+		return;
+	}
+
+	const DWORD pCell = *reinterpret_cast<DWORD const volatile*>(arrayBase + index * 4);
+	if (!pCell)
+	{
+		PlayerCountExt::Log("[cell] %s: (%d,%d) slot empty (stride 1<<%d) — cell not allocated\n",
+			where, cell.c.X, cell.c.Y, shift);
+		return;
+	}
+
+	const auto byteAt = [pCell](int off) { return *reinterpret_cast<BYTE const volatile*>(pCell + off); };
+	const auto dwordAt = [pCell](int off) { return *reinterpret_cast<DWORD const volatile*>(pCell + off); };
+
+	// How much of the 0x148-byte cell is non-zero? A freshly constructed cell
+	// that has coordinates but no terrain reads almost entirely zero.
+	int nonZero = 0;
+	for (int i = 0; i < 0x148; ++i)
+		if (byteAt(i)) ++nonZero;
+
+	const short mx = *reinterpret_cast<short const volatile*>(pCell + 0x24);
+	const short my = *reinterpret_cast<short const volatile*>(pCell + 0x26);
+
+	PlayerCountExt::Log("[cell] %s: (%d,%d) -> 0x%08X  MapCoords=(%d,%d)  id@+0x10=%u  "
+		"occupy@+0x124=0x%02X  flags@+0x140=0x%08X  level@+0x11B=%d  nonzero=%d/328\n",
+		where, cell.c.X, cell.c.Y, pCell, mx, my,
+		dwordAt(0x10), byteAt(0x124), dwordAt(0x140),
+		static_cast<int>(static_cast<signed char>(byteAt(0x11B))), nonZero);
+}

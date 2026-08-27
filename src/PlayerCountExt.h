@@ -28,4 +28,8 @@ namespace PlayerCountExt
 	extern bool Enabled;   // set when -SPAWN is seen on the command line
 
 	void Log(const char* format, ...);
+
+	// Read-only: reports whether a cell object exists for `rawCell` and whether
+	// its TERRAIN content has been filled in yet. See Instrumentation.cpp.
+	void ProbeCellTerrain(const char* where, DWORD rawCell);
 }
