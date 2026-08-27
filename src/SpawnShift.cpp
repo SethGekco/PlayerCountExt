@@ -496,6 +496,9 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	// not — which is the normal case for AI, and for every house past the
 	// map's own count — fall back to whatever the engine assigned and work out
 	// which base position that is.
+	bool hadNoStart = false;
+	bool explicitChoice = false;
+
 	int startIndex = StartIndexFromSpawnIni(pHouse);
 
 	if (startIndex < 0)
@@ -509,10 +512,15 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		// "there is no 9th player" symptom. Start it at base 0 and let the
 		// search below find the first free, usable slot for it.
 		startIndex = (engineBase < 0) ? 0 : engineBase;
+		hadNoStart = (engineBase < 0);
 
-		if (engineBase < 0)
+		if (hadNoStart)
 			PlayerCountExt::Log("[shift] house@0x%08X had no start position (engine cell (%d,%d)); "
 				"searching for a free one\n", pHouse, had.Cell.X, had.Cell.Y);
+	}
+	else
+	{
+		explicitChoice = true;
 	}
 
 	int ring = startIndex / RealStartCount;
@@ -535,13 +543,51 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	bool bumped = false;
 	bool found = false;
 
-	// Try (base, ring), then later rings of the same base, then — if this house
-	// has nowhere of its own at all — every other base. A slot is only accepted
-	// when it is BOTH unclaimed and somewhere a house can actually stand.
+	// An EXPLICIT pick is honoured at its own base: if the offset cell is off
+	// the map, pull it back along the SAME direction until it is usable, rather
+	// than relocating the house to a different base.
 	//
-	// Rejecting unusable cells is what stops the ring from flinging houses off
-	// the map: a base near an edge has ring cells beyond it, and previously we
-	// placed houses there regardless.
+	// Relocating was both surprising ("I chose 1S and started across the map")
+	// and exploitable — a player could pick a deliberately off-map angle to get
+	// moved somewhere better. Clamping toward the edge keeps the choice honest:
+	// the worst case is you start nearer your base than you asked.
+	if (explicitChoice && ring > 0 && ring < RingCount)
+	{
+		int fullX = 0, fullY = 0;
+		const char* csrc = "built-in default";
+		ResolveOffset(base, ring, fullX, fullY, csrc);
+
+		const int unitX = RingOffsets[ring].dX;
+		const int unitY = RingOffsets[ring].dY;
+		int distance = fullX / (unitX ? unitX : 1);
+		if (!unitX) distance = fullY / (unitY ? unitY : 1);
+		if (distance < 0) distance = -distance;
+
+		for (int d = distance; d >= 1 && !found; --d)
+		{
+			PackedCell candidate;
+			candidate.Raw = table[base];
+			candidate.Cell.X = static_cast<short>(candidate.Cell.X + unitX * d);
+			candidate.Cell.Y = static_cast<short>(candidate.Cell.Y + unitY * d);
+
+			if (IsClaimed(candidate.Raw) || !CellIsUsable(candidate.Raw))
+				continue;
+
+			target = candidate;
+			dX = unitX * d; dY = unitY * d; source = csrc;
+			bumped = (d != distance);
+			base_out = base;
+			found = true;
+
+			if (bumped)
+				PlayerCountExt::Log("[shift]   \"%d%s\" clamped to %d cells (map edge)\n",
+					base + 1, DirNames[ring], d);
+		}
+	}
+
+	// Otherwise (or if even distance 1 was unusable): try later rings of this
+	// base, then every other base. Only reached for houses with no choice of
+	// their own, or when the chosen direction is entirely unusable.
 	for (int attempt = 0; attempt < RealStartCount && !found; ++attempt)
 	{
 		const int tryBase = (base + attempt) % RealStartCount;
@@ -590,9 +636,14 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 	Claim(target.Raw);
 
-	if (ring == 0 && !bumped)
+	if (ring == 0 && !bumped && !hadNoStart)
 	{
 		// The engine's own answer was already fine — claim it and leave it be.
+		//
+		// hadNoStart must be excluded here. A house the engine gave nothing
+		// lands on base 0 ring 0 with nothing "changed", and returning early
+		// left it holding its original garbage cell — it then spawned nothing,
+		// which is precisely why the 9th player kept not appearing.
 		return 0;
 	}
 
