@@ -81,6 +81,17 @@ namespace
 
 		PlayerCountExt::Log("[trace] %s house@0x%08X start=%d cell=(%d,%d) <- caller 0x%08X\n",
 			what, pHouse, startIndex, c.Cell.X, c.Cell.Y, caller);
+
+		// Terrain window. It is absent at spawn assignment (0x5D6D3F) but must be
+		// present by 0x7398CE, which derives the base cell from where a unit
+		// actually landed. Probing the late writer once pins down which side of
+		// this seam the reachability check can live on.
+		static bool probedLateWriter = false;
+		if (!probedLateWriter && caller == 0x007398D3)
+		{
+			probedLateWriter = true;
+			PlayerCountExt::ProbeCellTerrain("at late base-cell write (0x7398D3)", raw);
+		}
 	}
 }
 
