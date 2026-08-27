@@ -51,10 +51,10 @@
 *  synced seed", which would also work but has a failure mode this does not.
 *
 *  ⚠ NOT YET ADDRESSED:
-*    - Terrain: the target cell is not validated, so a shifted house can land on
-*      water, a cliff, or an occupied cell. Note the map header rectangle
-*      (StartX/Width...) CANNOT be used for this — it is not cell space; a check
-*      built on it rejected every valid spawn on the test map.
+*    - Base FOOTPRINT is not checked. A cell can be usable while the space
+*      around it is not, so two shifted spawns 20 cells apart may still fight
+*      for building room. IsWithinUsableArea answers "can something stand here",
+*      not "is there room for a base".
 *    - The auto-ally pass at 0x5D74AF allies houses sharing +0x1605C, so houses
 *      derived from the same base position may start allied.
 *    - 0x007398D3 writes base cells again shortly after us, offset (-1,-1).
@@ -163,6 +163,25 @@ namespace
 	{
 		if (ClaimCount < MaxClaims)
 			ClaimedCells[ClaimCount++] = raw;
+	}
+
+	// Can a house actually stand on this cell?
+	//
+	// MapClass::IsWithinUsableArea covers both "is this cell on the map at all"
+	// and the level/terrain checks, which is what we need: an earlier attempt
+	// used the map-header rectangle and rejected every valid spawn, because that
+	// rectangle is not cell space. This is the engine's own answer to the
+	// question, so it cannot disagree with the engine.
+	//
+	// YRpp declares it as IsWithinUsableArea(const CellStruct&, bool), i.e. the
+	// cell arrives BY REFERENCE — hence a pointer here, not a packed DWORD.
+	constexpr DWORD AddrMapClass = 0x87F7E8;
+	using IsWithinUsableArea_t = bool (__thiscall*)(void*, const void*, bool);
+
+	bool CellIsUsable(DWORD raw)
+	{
+		const auto fn = reinterpret_cast<IsWithinUsableArea_t>(0x578460);
+		return fn(reinterpret_cast<void*>(AddrMapClass), &raw, true);
 	}
 
 	// Which base position does this cell correspond to? -1 if it is not one of
@@ -466,13 +485,23 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	if (startIndex < 0)
 	{
 		const int engineBase = BaseIndexOfCell(had.Raw);
+
+		// engineBase < 0 means the engine gave this house nothing recognisable —
+		// which is exactly what happens to the surplus house once the engine's
+		// own start-position search is suppressed. Previously we left it alone,
+		// so it spawned nothing and was out before the player saw it: the
+		// "there is no 9th player" symptom. Start it at base 0 and let the
+		// search below find the first free, usable slot for it.
+		startIndex = (engineBase < 0) ? 0 : engineBase;
+
 		if (engineBase < 0)
-			return 0;   // not on a start cell at all; leave it alone
-		startIndex = engineBase;
+			PlayerCountExt::Log("[shift] house@0x%08X had no start position (engine cell (%d,%d)); "
+				"searching for a free one\n", pHouse, had.Cell.X, had.Cell.Y);
 	}
 
 	int ring = startIndex / RealStartCount;
 	const int base = startIndex % RealStartCount;
+	int base_out = base;
 
 	// ── More houses than positions ──────────────────────────────────────
 	// The engine allows one house per start, and with the deficiency search
@@ -488,48 +517,74 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	int dX = 0, dY = 0;
 	const char* source = "built-in default";
 	bool bumped = false;
+	bool found = false;
 
-	while (true)
+	// Try (base, ring), then later rings of the same base, then — if this house
+	// has nowhere of its own at all — every other base. A slot is only accepted
+	// when it is BOTH unclaimed and somewhere a house can actually stand.
+	//
+	// Rejecting unusable cells is what stops the ring from flinging houses off
+	// the map: a base near an edge has ring cells beyond it, and previously we
+	// placed houses there regardless.
+	for (int attempt = 0; attempt < RealStartCount && !found; ++attempt)
 	{
-		if (ring == 0)
-		{
-			target.Raw = table[base];
-			dX = dY = 0;
-		}
-		else if (ring < RingCount)
-		{
-			target.Raw = table[base];
-			ResolveOffset(base, ring, dX, dY, source);
-			target.Cell.X = static_cast<short>(target.Cell.X + dX);
-			target.Cell.Y = static_cast<short>(target.Cell.Y + dY);
-		}
-		else
-		{
-			PlayerCountExt::Log("[shift] house@0x%08X — no free ring left for base %d; leaving engine placement\n",
-				pHouse, base + 1);
-			return 0;
-		}
+		const int tryBase = (base + attempt) % RealStartCount;
 
-		if (!IsClaimed(target.Raw))
+		for (int tryRing = (attempt == 0 ? ring : 0); tryRing < RingCount; ++tryRing)
+		{
+			PackedCell candidate;
+			candidate.Raw = table[tryBase];
+			int cdX = 0, cdY = 0;
+			const char* csrc = "built-in default";
+
+			if (tryRing > 0)
+			{
+				ResolveOffset(tryBase, tryRing, cdX, cdY, csrc);
+				candidate.Cell.X = static_cast<short>(candidate.Cell.X + cdX);
+				candidate.Cell.Y = static_cast<short>(candidate.Cell.Y + cdY);
+			}
+
+			if (IsClaimed(candidate.Raw))
+				continue;
+
+			if (!CellIsUsable(candidate.Raw))
+			{
+				if (tryRing > 0)
+					PlayerCountExt::Log("[shift]   skip \"%d%s\" (%d,%d) — not usable terrain\n",
+						tryBase + 1, DirNames[tryRing], candidate.Cell.X, candidate.Cell.Y);
+				continue;
+			}
+
+			target = candidate;
+			dX = cdX; dY = cdY; source = csrc;
+			bumped = (tryBase != base) || (tryRing != ring);
+			base_out = tryBase;
+			ring = tryRing;
+			found = true;
 			break;
+		}
+	}
 
-		++ring;
-		bumped = true;
+	if (!found)
+	{
+		PlayerCountExt::Log("[shift] house@0x%08X — no usable free position anywhere; leaving engine placement\n",
+			pHouse);
+		return 0;
 	}
 
 	Claim(target.Raw);
 
-	if (ring == 0)
+	if (ring == 0 && !bumped)
 	{
-		// Unshifted and unclaimed — the engine's own answer stands.
+		// The engine's own answer was already fine — claim it and leave it be.
 		return 0;
 	}
 
 	PlayerCountExt::Log("[shift] house@0x%08X -> \"%d%s\"%s — engine had (%d,%d); base %d (%d,%d) + (%+d,%+d) = (%d,%d)  [%s]%s\n",
-		pHouse, base + 1, DirNames[ring],
-		bumped ? " (bumped: base was taken)" : "",
-		had.Cell.X, had.Cell.Y, base + 1,
-		PackedCell{ table[base] }.Cell.X, PackedCell{ table[base] }.Cell.Y,
+		pHouse, base_out + 1, DirNames[ring],
+		bumped ? " (relocated)" : "",
+		had.Cell.X, had.Cell.Y, base_out + 1,
+		PackedCell{ table[base_out] }.Cell.X, PackedCell{ table[base_out] }.Cell.Y,
 		dX, dY, target.Cell.X, target.Cell.Y, source,
 		ApplyShift ? "" : "  (diagnostic, not applied)");
 
