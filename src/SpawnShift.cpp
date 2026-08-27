@@ -751,6 +751,45 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Do we have more houses wanting a start position than the map provides?
+//
+// Neutral and Special sit in HouseClass::Array but need no position by design,
+// so counting them would overstate the shortfall — same HouseTypeClass + 0x1A6
+// test the shift itself uses.
+// ---------------------------------------------------------------------------
+static int CountPlayingHouses()
+{
+	const auto pArrayItems = *reinterpret_cast<DWORD* const volatile*>(AddrHouseArrayItems);
+	const int arrayCount = *reinterpret_cast<int const volatile*>(AddrHouseArrayCount);
+	if (!pArrayItems)
+		return 0;
+
+	int playing = 0;
+	for (int i = 0; i < arrayCount; ++i)
+	{
+		const DWORD pHouse = pArrayItems[i];
+		if (!pHouse)
+			continue;
+
+		const auto pType = *reinterpret_cast<DWORD const volatile*>(pHouse + 0x34);
+		if (pType && !*reinterpret_cast<BYTE const volatile*>(pType + 0x1A6))
+			++playing;
+	}
+
+	return playing;
+}
+
+static bool HasStartShortfall(int& playing)
+{
+	RefreshRealStartCount();
+	if (RealStartCount <= 0)
+		return false;
+
+	playing = CountPlayingHouses();
+	return playing > RealStartCount;
+}
+
 // Suppress the engine's "start waypoint deficiency" search — 0x688508.
 //
 // With more houses than the map has start positions, the engine logs
@@ -798,32 +837,8 @@ DEFINE_HOOK(0x688508, PlayerCountExt_SpawnShift_SuppressDeficiencySearch, 0x5)
 	if (!ApplyShift)
 		return 0; // the shift is compiled out, so nothing else supplies positions
 
-	RefreshRealStartCount();
-	if (RealStartCount <= 0)
-		return 0;
-
-	// Count houses that actually need a start position. Neutral and Special are
-	// in HouseClass::Array but have none by design, so counting them would
-	// overstate the shortfall — same HouseTypeClass + 0x1A6 test the shift uses.
-	const auto pArrayItems = *reinterpret_cast<DWORD* const volatile*>(AddrHouseArrayItems);
-	const int arrayCount = *reinterpret_cast<int const volatile*>(AddrHouseArrayCount);
-
 	int playing = 0;
-	if (pArrayItems)
-	{
-		for (int i = 0; i < arrayCount; ++i)
-		{
-			const DWORD pHouse = pArrayItems[i];
-			if (!pHouse)
-				continue;
-
-			const auto pType = *reinterpret_cast<DWORD const volatile*>(pHouse + 0x34);
-			if (pType && !*reinterpret_cast<BYTE const volatile*>(pType + 0x1A6))
-				++playing;
-		}
-	}
-
-	if (playing <= RealStartCount)
+	if (!HasStartShortfall(playing))
 		return 0; // no real shortfall — vanilla behaviour
 
 	PlayerCountExt::Log("[shift] suppressing the engine's start-position search: "
@@ -831,4 +846,64 @@ DEFINE_HOOK(0x688508, PlayerCountExt_SpawnShift_SuppressDeficiencySearch, 0x5)
 		"(the search does not terminate)\n", playing, RealStartCount);
 
 	return 0x68864D;
+}
+
+// ---------------------------------------------------------------------------
+// Bypass the engine's free-start-position picker — 0x5D6CFB.
+//
+// The per-house loop at 0x5D6CBF..0x5D6D47 turns a house into a base cell. It
+// first scans the map's 16-entry HouseIndices table for this house:
+//
+//     5d6cf9:  test bl,bl
+//     5d6cfb:  jne  0x5d6d30        ; seated: cell = startCellTable[edx]
+//     5d6cfd:  add  ebp,0x24        ; NOT seated -> ask the engine for a position
+//     ...
+//     5d6d17:  mov  edx,[ecx]       ; ecx from [esp+0x1c]
+//     5d6d25:  call [edx+0xc4]
+//     5d6d30:  mov  ecx,[esp+0x28]  ; the seated path
+//     5d6d34:  mov  edx,[ecx+edx*4]
+//     5d6d38:  mov  ecx,edi         ; edi = the house
+//     5d6d3a:  call 0x50e000        ; SetBaseCell
+//
+// That picker draws from a pool of unused start positions. Neutral and Special
+// are never seated, so vanilla calls it twice in every game and it copes. It
+// does NOT cope with being drained: on a 2-position map with 9 houses it
+// returned garbage (49,0) for the first surplus house and then read a stale
+// pointer for the next — C0000005 at 0x5D6D17, ecx = 0x01A44850, ESI = 3.
+//
+// We do not need the picker at all. Our own hook at 0x5D6D3F assigns the real
+// cell a few instructions later, so anything it returns is overwritten anyway.
+// Forcing EDX = 0 sends the house down the SEATED path instead, which is the
+// well-trodden vanilla route: it reads startCellTable[0], a genuinely valid
+// cell, and the shift then relocates it to its proper ring position.
+//
+// ⚠ Only when there is a real shortfall. Without one the picker is not drained
+// and works exactly as it always has, so normal games are left bit-identical —
+// including the two calls vanilla makes for Neutral and Special.
+//
+// Stolen bytes 5: 75 33 (jne, 2) + 83 c5 24 (add ebp,0x24, 3). Because the jne
+// itself is stolen we own the branch: 0x5D6D30 takes it, 0x5D6D00 falls through
+// (and must re-apply the add ebp,0x24 we consumed).
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x5D6CFB, PlayerCountExt_SpawnShift_BypassBrokenPositionPicker, 0x5)
+{
+	GET(DWORD, ebx, EBX);
+
+	if (ebx & 0xFF)
+		return 0x5D6D30; // seated in HouseIndices — vanilla taken branch
+
+	int playing = 0;
+	if (!ApplyShift || !HasStartShortfall(playing))
+	{
+		R->EBP(R->EBP() + 0x24); // the add we stole
+		return 0x5D6D00;         // vanilla fall-through to the picker
+	}
+
+	GET(DWORD, pHouse, EDI);
+	PlayerCountExt::Log("[shift] house@0x%08X has no seat in HouseIndices; using start 0 as a "
+		"placeholder instead of the engine's picker (%d houses vs %d positions — the picker "
+		"runs dry and faults at 0x5D6D17)\n", pHouse, playing, RealStartCount);
+
+	R->EDX(0);
+	return 0x5D6D30;
 }
