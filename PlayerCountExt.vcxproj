@@ -73,6 +73,7 @@
     <ClCompile Include="src\Main.cpp" />
     <ClCompile Include="src\Instrumentation.cpp" />
     <ClCompile Include="src\SpawnConfig.cpp" />
+    <ClCompile Include="src\RulesConfig.cpp" />
     <ClCompile Include="src\AIRefill.cpp" />
     <ClCompile Include="src\StartPoints.cpp" />
     <ClCompile Include="src\SpawnShift.cpp" />
@@ -83,6 +84,7 @@
     <ClInclude Include="src\PlayerCountExt.h" />
     <ClInclude Include="src\GameConstruct.h" />
     <ClInclude Include="src\SpawnConfig.h" />
+    <ClInclude Include="src\RulesConfig.h" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -65,6 +65,7 @@
 
 #include "PlayerCountExt.h"
 #include "SpawnConfig.h"
+#include "RulesConfig.h"
 
 #include <Windows.h>
 #include <climits>
@@ -123,7 +124,9 @@ namespace
 	// have heavily overlapping build radii and fight for room. 20 gives each
 	// base somewhere to grow while keeping them recognisably "at the same
 	// start". Worth revisiting once it can be seen in game.
-	constexpr int ShiftDistance = 20; // built-in default; per-map overrides below
+	// Fallback when nothing else supplies a distance. Kept only as the ceiling
+	// for the scaled default below — see DefaultShiftDistance().
+	constexpr int ShiftDistance = 20; // per-map and rules overrides below
 
 	// ── DIAGNOSTIC MODE ───────────────────────────────────────────────────
 	// When false, this file OBSERVES but never writes: it still computes and
@@ -210,6 +213,42 @@ namespace
 		const int n = *reinterpret_cast<int const volatile*>(pScen + OffNumberStartingPoints);
 		if (n > 0)
 			RealStartCount = n;
+	}
+
+	// -----------------------------------------------------------------------
+	// The built-in shift distance, scaled to the map.
+	//
+	// A fixed 20 cells is only sensible on a large map. On the 80x80 two-player
+	// map used for the 9-house test it is a QUARTER of the map per hop, which
+	// is how a surplus house ended up marooned on an offshore island: the
+	// candidate cell passed the "is this usable ground" test but was nowhere
+	// near the spawn it was derived from.
+	//
+	// Scaling by the smaller dimension keeps the hop proportionate. The floor
+	// of 8 is roughly the clearance a construction yard plus its immediate
+	// buildings wants, below which shifted spawns would overlap the one they
+	// came from; the ceiling is the old 20, so large maps behave exactly as
+	// before and nothing regresses.
+	//
+	// This is only a better DEFAULT, not a correctness fix — a shorter hop
+	// makes a marooned spawn less likely but cannot rule it out. Reachability
+	// is what actually rules it out, and is handled separately.
+	// -----------------------------------------------------------------------
+	constexpr int MinShiftDistance = 8;
+
+	int DefaultShiftDistance()
+	{
+		const int W = *reinterpret_cast<int const volatile*>(AddrMapClass + 0xF4);
+		const int H = *reinterpret_cast<int const volatile*>(AddrMapClass + 0xF8);
+
+		const int smaller = (W < H) ? W : H;
+		if (smaller <= 0)
+			return ShiftDistance; // map not sized yet — fall back to the old constant
+
+		int d = smaller / 6;
+		if (d < MinShiftDistance) d = MinShiftDistance;
+		if (d > ShiftDistance)    d = ShiftDistance;
+		return d;
 	}
 
 	// -----------------------------------------------------------------------
@@ -344,7 +383,16 @@ namespace
 		}
 
 		if (distance == INT_MIN)
-			distance = ShiftDistance;
+		{
+			distance = PlayerCountExt::RulesConfig::ShiftDistance();
+			if (distance != INT_MIN) source = "rules ShiftDistance";
+		}
+
+		if (distance == INT_MIN)
+		{
+			distance = DefaultShiftDistance();
+			source = "built-in, scaled to map size";
+		}
 
 		dX = RingOffsets[ring].dX * distance;
 		dY = RingOffsets[ring].dY * distance;
