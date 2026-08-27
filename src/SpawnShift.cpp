@@ -85,6 +85,22 @@ namespace
 
 	// Ring 0 is the unshifted original; rings 1..8 are the compass directions
 	// in the order the label suffixes imply.
+	//
+	// ── DIRECTIONS ARE CELL-SPACE, DELIBERATELY ──────────────────────────
+	// N is -Y in cell coordinates, not "up the screen". RA2's view is
+	// isometric, so cell-north renders towards the top-RIGHT and every label
+	// here is rotated ~45 degrees from what a player literally sees.
+	//
+	// This is intentional and should not be "fixed". The engine's own compass
+	// is cell-space — Facing=, waypoint maths, and every other direction a
+	// modder already works with — so matching it means existing intuition
+	// transfers. A screen-space compass would read more naturally to a new
+	// player while disagreeing with everything else in the game.
+	//
+	// Consequence worth knowing when reading bug reports: someone describing a
+	// shifted spawn as "it went south-east" may be describing cell-west. Judge
+	// the geometry (does the set of 8 form a ring around the base?) rather than
+	// any single direction name.
 	struct Offset { int dX; int dY; };
 
 	constexpr Offset RingOffsets[] = {
