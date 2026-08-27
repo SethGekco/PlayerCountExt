@@ -86,12 +86,10 @@ namespace
 		// present by 0x7398CE, which derives the base cell from where a unit
 		// actually landed. Probing the late writer once pins down which side of
 		// this seam the reachability check can live on.
-		static bool probedLateWriter = false;
-		if (!probedLateWriter && caller == 0x007398D3)
-		{
-			probedLateWriter = true;
+		// Probe EVERY late write, not just the first: the whole point is to compare
+		// signatures across several different cells.
+		if (caller == 0x007398D3)
 			PlayerCountExt::ProbeCellTerrain("at late base-cell write (0x7398D3)", raw);
-		}
 	}
 }
 

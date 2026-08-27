@@ -367,9 +367,35 @@ void PlayerCountExt::ProbeCellTerrain(const char* where, DWORD rawCell)
 	const short mx = *reinterpret_cast<short const volatile*>(pCell + 0x24);
 	const short my = *reinterpret_cast<short const volatile*>(pCell + 0x26);
 
+	// TERRAIN SIGNATURE — the decisive measurement, and the one that does not
+	// depend on knowing a single field offset.
+	//
+	// Hash the cell while masking out everything that is per-cell bookkeeping
+	// rather than terrain: the object id, MapCoords, the occupation flags (a
+	// unit standing there) and the pointer at +0x144. If two DIFFERENT cells
+	// hash the same, they carry no terrain — a water cell and a grass cell
+	// cannot be byte-identical. If they differ, terrain is loaded.
+	//
+	// Counting non-zero bytes, which an earlier version of this probe did, is a
+	// bad metric: a plain cell legitimately reads ~79/328 because whole runs of
+	// it are 0xFF "none" sentinels for overlay/smudge/owner.
+	unsigned int signature = 2166136261u; // FNV-1a
+	for (int i = 0; i < 0x148; ++i)
+	{
+		const bool masked =
+			(i >= 0x010 && i < 0x014) ||   // object id (increments per cell)
+			(i >= 0x024 && i < 0x028) ||   // MapCoords
+			(i >= 0x124 && i < 0x12C) ||   // occupation flags
+			(i >= 0x144 && i < 0x148);     // per-cell pointer
+
+		signature ^= masked ? 0u : byteAt(i);
+		signature *= 16777619u;
+	}
+
 	PlayerCountExt::Log("[cell] %s: (%d,%d) -> 0x%08X  MapCoords=(%d,%d)  id@+0x10=%u  "
-		"occupy@+0x124=0x%02X  flags@+0x140=0x%08X  level@+0x11B=%d  nonzero=%d/328\n",
+		"tile@+0x38=0x%08X  occupy@+0x124=0x%02X  flags@+0x140=0x%08X  level@+0x11B=%d  "
+		"nonzero=%d/328  terrainSig=0x%08X\n",
 		where, cell.c.X, cell.c.Y, pCell, mx, my,
-		dwordAt(0x10), byteAt(0x124), dwordAt(0x140),
-		static_cast<int>(static_cast<signed char>(byteAt(0x11B))), nonZero);
+		dwordAt(0x10), dwordAt(0x38), byteAt(0x124), dwordAt(0x140),
+		static_cast<int>(static_cast<signed char>(byteAt(0x11B))), nonZero, signature);
 }
