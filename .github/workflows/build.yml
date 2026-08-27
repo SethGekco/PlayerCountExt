@@ -21,6 +21,12 @@ jobs:
             git clone --depth 1 https://github.com/Phobos-developers/YRpp.git YRpp
           }
 
+      - name: Check hook conflicts against the Hook Encyclopedia
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/SethGekco/YR-Hook-Encyclopedia.git _enc
+          python3 tools/check_hook_conflicts.py --registry _enc/registry/hooks.json
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
