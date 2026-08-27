@@ -464,6 +464,22 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	if (!pHouse || !CachedCellTable)
 		return 0;
 
+	// Skip Neutral and Special.
+	//
+	// HouseClass::Array holds them alongside the real players — an 11-house
+	// array is 9 players plus these two — and they have no start position by
+	// design. Treating them as houses needing a spawn had them consume slots
+	// from the search and compete with the actual surplus player for space,
+	// which is why the 9th player still failed to appear even after the search
+	// was added.
+	//
+	// The test is the engine's own: HouseTypeClass + 0x1A6, which vanilla checks
+	// at 0x5D74C9 for exactly this purpose before pairing houses in the
+	// auto-ally pass.
+	const auto pType = *reinterpret_cast<DWORD const volatile*>(pHouse + 0x34);
+	if (!pType || *reinterpret_cast<BYTE const volatile*>(pType + 0x1A6))
+		return 0;
+
 	RefreshRealStartCount();
 	if (RealStartCount <= 0)
 		return 0;
