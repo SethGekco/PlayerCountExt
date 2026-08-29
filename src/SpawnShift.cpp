@@ -204,15 +204,28 @@ namespace
 	constexpr int OffNumberStartingPoints = 0x113C;
 	constexpr DWORD AddrScenarioPtr = 0xA8B230;
 
-	void RefreshRealStartCount()
+	// Returns whether the scenario actually supplied a count THIS call.
+	//
+	// It must, because the count is the divisor that decodes a start index into
+	// (base, ring) and it has to match the one the client encoded with. When the
+	// scenario is not populated yet the old behaviour was to silently keep the
+	// previous value — which meant the stale default of 8 — and a shifted index
+	// then decoded to the wrong ring: 52 is 5NW at a count of 6 (52/6 = ring 8)
+	// but 5SW at a count of 8 (52/8 = ring 6). Same base by coincidence, wrong
+	// direction, and a spawn cell written from a base table that is itself not
+	// yet final. Callers that place houses must treat false as "not now".
+	bool RefreshRealStartCount()
 	{
 		const auto pScen = *reinterpret_cast<DWORD const volatile*>(AddrScenarioPtr);
 		if (!pScen)
-			return;
+			return false;
 
 		const int n = *reinterpret_cast<int const volatile*>(pScen + OffNumberStartingPoints);
-		if (n > 0)
-			RealStartCount = n;
+		if (n <= 0)
+			return false;
+
+		RealStartCount = n;
+		return true;
 	}
 
 	// -----------------------------------------------------------------------
@@ -528,7 +541,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	if (!pType || *reinterpret_cast<BYTE const volatile*>(pType + 0x1A6))
 		return 0;
 
-	RefreshRealStartCount();
+	const bool countIsReal = RefreshRealStartCount();
 	if (RealStartCount <= 0)
 		return 0;
 
@@ -537,6 +550,23 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 	PackedCell had;
 	had.Raw = *pHomeCell;
+
+	// AssignHouses runs twice. The first pass precedes both the terrain load and
+	// the scenario's start-position count, so anything placed then is computed
+	// from a stale divisor and a non-final cell table. Do not write during it.
+	if (!countIsReal)
+	{
+		static bool warned = false;
+		if (!warned)
+		{
+			warned = true;
+			PlayerCountExt::Log("[shift] scenario start count not available yet; leaving placement "
+				"to the later pass (decoding now would use the stale default of %d)\n",
+				RealStartCount);
+		}
+
+		return 0;
+	}
 
 	// One probe per pass: is there terrain under the cells at this point? The
 	// reachability check can only live here if there is. Read-only.
