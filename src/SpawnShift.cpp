@@ -568,6 +568,21 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		return 0;
 	}
 
+	// A table from a previous invocation points at reused stack. Refuse rather
+	// than compute offsets from whatever is there now.
+	if (!CachedCellTable)
+	{
+		static bool warned = false;
+		if (!warned)
+		{
+			warned = true;
+			PlayerCountExt::Log("[shift] no start-cell table captured this pass; leaving engine "
+				"placement (a table from an earlier pass is dead stack)\n");
+		}
+
+		return 0;
+	}
+
 	// One probe per pass: is there terrain under the cells at this point? The
 	// reachability check can only live here if there is. Read-only.
 	if (ClaimCount == 0)
@@ -771,6 +786,9 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 	// so it is the right place to clear the claimed-cell table.
 	ClaimCount = 0;
 
+	// New pass, new stack frame: the cached table pointer is no longer valid.
+	CachedCellTable = 0;
+
 	auto& spawn = PlayerCountExt::SpawnConfig::Get();
 	if (!spawn.Loaded())
 		return 0;
@@ -970,6 +988,21 @@ DEFINE_HOOK(0x688508, PlayerCountExt_SpawnShift_SuppressDeficiencySearch, 0x5)
 // ---------------------------------------------------------------------------
 DEFINE_HOOK(0x5D6CFB, PlayerCountExt_SpawnShift_BypassBrokenPositionPicker, 0x5)
 {
+	// Capture the start-cell table here, not only at 0x5D6C1D.
+	//
+	// It is a STACK argument, so a pointer cached in one invocation is dead
+	// stack in the next. 0x5D6C1D only fires for explicitly seated houses, and
+	// this very hook routes unseated ones straight to 0x5D6D30 — so on a pass
+	// where nothing is seated it never fired at all and the stale pass-1
+	// pointer was reused. Offsets then resolved to nonsense like (0,240),
+	// every candidate failed the usable-terrain test, and every house fell
+	// through to "leaving engine placement" and stayed bunched where the engine
+	// had put it.
+	//
+	// [ESP+0x28] is the same slot 0x5D6D30 reads, and the taken branch pushes
+	// nothing between here and there, so the offset is identical.
+	CachedCellTable = R->Stack32(0x28);
+
 	GET(DWORD, ebx, EBX);
 
 	if (ebx & 0xFF)
