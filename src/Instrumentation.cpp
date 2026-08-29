@@ -295,11 +295,13 @@ DEFINE_HOOK(0x688378, PlayerCountExt_AssignHouses_Exit, 0x5)
 
 	PlayerCountExt::Log("=== [instr] AssignHouses done ===\n\n");
 
-	// Apply team alliances here too. The 0x5D74A1 seam logged nothing on a
-	// 16-player run, so the engine may not reach the vanilla auto-ally pass in
-	// spawn mode; this hook demonstrably runs every game and the houses exist
-	// by now. Idempotent, so both firing is harmless.
-	PlayerCountExt::ApplyAlliancesFromSpawnIni("AssignHouses exit (0x688378)");
+	// NOTE: do NOT call into the engine from here. This hook's stolen bytes are
+	//   688378:  pop edi / pop esi / add esp,0x4c
+	// and a hook window containing ESP arithmetic cannot safely host deep calls
+	// — the alliance pass lived here briefly and its 184 MakeAlly calls (each
+	// opening `sub esp,0xa8`) left the stack skewed by a byte, ending in a
+	// vtable dispatch to garbage. It now runs from 0x5D6D3F, whose stolen bytes
+	// are a plain `mov eax,ds:[..]`. Keep this hook observational.
 
 	return 0; // continue original code
 }

@@ -682,7 +682,18 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	// One probe per pass: is there terrain under the cells at this point? The
 	// reachability check can only live here if there is. Read-only.
 	if (ClaimCount == 0)
+	{
 		PlayerCountExt::ProbeCellTerrain("at spawn assignment (0x5D6D3F)", had.Raw);
+
+		// Team alliances, applied here rather than at the AssignHouses exit.
+		// That hook's stolen bytes include `add esp,0x4c`, and hosting 184
+		// MakeAlly calls (each `sub esp,0xa8`) inside an ESP-modifying window
+		// skewed the stack by a byte and crashed on a later vtable dispatch.
+		// This hook's stolen bytes are a plain `mov eax,ds:[0xa80238]`, so deep
+		// calls are safe, and the seating decisions below want the team data
+		// anyway.
+		PlayerCountExt::ApplyAlliancesFromSpawnIni("spawn assignment (0x5D6D3F)");
+	}
 
 	// Where does this house want to be?
 	//
