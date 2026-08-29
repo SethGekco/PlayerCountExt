@@ -295,6 +295,12 @@ DEFINE_HOOK(0x688378, PlayerCountExt_AssignHouses_Exit, 0x5)
 
 	PlayerCountExt::Log("=== [instr] AssignHouses done ===\n\n");
 
+	// Apply team alliances here too. The 0x5D74A1 seam logged nothing on a
+	// 16-player run, so the engine may not reach the vanilla auto-ally pass in
+	// spawn mode; this hook demonstrably runs every game and the houses exist
+	// by now. Idempotent, so both firing is harmless.
+	PlayerCountExt::ApplyAlliancesFromSpawnIni("AssignHouses exit (0x688378)");
+
 	return 0; // continue original code
 }
 

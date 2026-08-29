@@ -32,4 +32,8 @@ namespace PlayerCountExt
 	// Read-only: reports whether a cell object exists for `rawCell` and whether
 	// its TERRAIN content has been filled in yet. See Instrumentation.cpp.
 	void ProbeCellTerrain(const char* where, DWORD rawCell);
+
+	// Applies every [MultiN_Alliances] pair from spawn.ini. Idempotent — MakeAlly
+	// is additive, so calling it from more than one seam is safe.
+	void ApplyAlliancesFromSpawnIni(const char* where);
 }

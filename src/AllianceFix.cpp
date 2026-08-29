@@ -80,18 +80,7 @@ namespace
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Head of the auto-ally pass — 0x5D74A1.
-//
-//     5d74a0:  push ecx
-//     5d74a1:  mov  edx,ds:0xa80238    ; <- we hook here, 6 bytes
-//
-// Hooked one instruction in, deliberately: the entry's `push ecx` moves ESP,
-// and stolen bytes that shift the stack are a known way to corrupt a hook. This
-// `mov` is stack-neutral. Cooperative `return 0`, so vanilla's own pass still
-// runs afterwards.
-// ---------------------------------------------------------------------------
-DEFINE_HOOK(0x5D74A1, PlayerCountExt_AllianceFix_ApplyFromSpawnIni, 0x6)
+void PlayerCountExt::ApplyAlliancesFromSpawnIni(const char* where)
 {
 	static int lastAppliedForCount = -1;
 
@@ -99,7 +88,10 @@ DEFINE_HOOK(0x5D74A1, PlayerCountExt_AllianceFix_ApplyFromSpawnIni, 0x6)
 	const int count = *reinterpret_cast<int const volatile*>(AddrHouseArrayCount);
 
 	if (!pArrayItems || count <= 0)
-		return 0;
+	{
+		PlayerCountExt::Log("[ally] %s: no houses yet (count=%d)\n", where, count);
+		return;
+	}
 
 	// The pass can run more than once per game; applying twice is harmless but
 	// the log noise is not.
@@ -141,10 +133,30 @@ DEFINE_HOOK(0x5D74A1, PlayerCountExt_AllianceFix_ApplyFromSpawnIni, 0x6)
 		}
 	}
 
-	if (applied && !quiet)
-		PlayerCountExt::Log("[ally] applied %d alliance(s) from spawn.ini across %d houses "
-			"(%d of them past HouseAllyEight, which the spawner cannot express)\n",
-			applied, count, beyondSpawner);
+	// Log unconditionally, including zero. A silent hook is indistinguishable
+	// from one that never fired, and that ambiguity has already cost a round.
+	if (!quiet || applied)
+		PlayerCountExt::Log("[ally] %s: applied %d alliance(s) across %d houses "
+			"(%d past HouseAllyEight, which the spawner cannot express)\n",
+			where, applied, count, beyondSpawner);
+}
 
+// ---------------------------------------------------------------------------
+// Head of the vanilla auto-ally pass — 0x5D74A1.
+//
+//     5d74a0:  push ecx
+//     5d74a1:  mov  edx,ds:0xa80238    ; <- we hook here, 6 bytes
+//
+// Hooked one instruction in, deliberately: the entry's `push ecx` moves ESP,
+// and stolen bytes that shift the stack are a known way to corrupt a hook. This
+// `mov` is stack-neutral. Cooperative `return 0`, so vanilla's pass still runs.
+//
+// This fires only if the engine reaches the function at all. On a 16-player run
+// it logged nothing, which is why the worker is also called from the
+// AssignHouses exit — a seam that demonstrably runs every game.
+// ---------------------------------------------------------------------------
+DEFINE_HOOK(0x5D74A1, PlayerCountExt_AllianceFix_ApplyFromSpawnIni, 0x6)
+{
+	PlayerCountExt::ApplyAlliancesFromSpawnIni("auto-ally pass (0x5D74A1)");
 	return 0;
 }
