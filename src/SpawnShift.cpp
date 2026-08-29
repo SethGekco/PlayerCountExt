@@ -791,25 +791,31 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	// which is strictly worse for that player and for map balance. Sweeping
 	// ring 0 across every base first means shifted slots only ever appear once
 	// the map genuinely has more houses than positions.
-	// Within a ring, prefer the QUIETEST base rather than the first free one.
+	// Ring 0 first, then the quietest overflow slot anywhere.
 	//
-	// Once there are more houses than positions somebody must share a base, but
-	// nothing forced us to seat a player next to an enemy while a friendlier
-	// base sat open — the old loop simply took the first slot that fit. Scoring
-	// every base in the ring and taking the fewest already-seated enemies keeps
-	// teams together and rivals apart, and only ever reorders choices WITHIN a
-	// ring, so real positions are still exhausted before any shifted one.
+	// Two rules are in play and they need different orderings:
 	//
-	// Ties break on the original scan order, so this stays deterministic and
-	// every client still computes the same seat.
+	//   1. Real start positions are used before any shifted one. Non-negotiable
+	//      — a compass variant is overflow, not part of the normal pool.
+	//   2. Among OVERFLOW slots, being away from enemies matters more than
+	//      being on a low ring. All shifted slots are second-class anyway, so
+	//      "further out but clear" beats "close in but next to a rival".
+	//
+	// Scoring purely ring-major satisfied 1 and broke 2: with 16 houses on 6
+	// bases, ring 1 holds exactly 6 slots, so the last house placed took
+	// whatever remained — which on a 2v14 was the seat beside the two-player
+	// team, even though quieter bases had free slots one ring further out.
+	//
+	// So: ring 0 is swept on its own, and if nothing is free there, every
+	// (base, ring >= 1) pair is scored together and ordered by enemies, then
+	// ring, then base. Ties break on scan order, so this stays deterministic.
 	const int selfIndex = HouseArrayIndex(pHouse);
 
-	for (int tryRing = 0; tryRing < RingCount && !found; ++tryRing)
-	{
-		int bestBase = -1, bestEnemies = 0, bestdX = 0, bestdY = 0;
-		const char* bestSrc = "built-in default";
-		PackedCell bestCell{};
+	struct Seat { int base, ring, dX, dY, enemies; const char* src; PackedCell cell; };
+	Seat best{}; bool haveBest = false;
 
+	for (int tryRing = 0; tryRing < RingCount && !haveBest; ++tryRing)
+	{
 		for (int attempt = 0; attempt < RealStartCount; ++attempt)
 		{
 			const int tryBase = (base + attempt) % RealStartCount;
@@ -837,31 +843,52 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				continue;
 			}
 
-			const int enemies = EnemiesAtBase(tryBase, selfIndex);
+			const Seat seat{ tryBase, tryRing, cdX, cdY,
+				EnemiesAtBase(tryBase, selfIndex), csrc, candidate };
 
-			if (bestBase < 0 || enemies < bestEnemies)
+			// Ring 0 is taken on availability alone, lowest enemies as tiebreak,
+			// because rule 1 outranks everything.
+			if (tryRing == 0)
 			{
-				bestBase = tryBase; bestEnemies = enemies;
-				bestCell = candidate; bestdX = cdX; bestdY = cdY; bestSrc = csrc;
+				if (!haveBest || seat.enemies < best.enemies)
+				{
+					best = seat;
+					haveBest = true;
+					if (seat.enemies == 0)
+						break;
+				}
 
-				if (enemies == 0)
-					break; // cannot do better in this ring
+				continue;
+			}
+
+			// Overflow: fewest enemies wins outright, ring only breaks ties.
+			if (!haveBest
+				|| seat.enemies < best.enemies
+				|| (seat.enemies == best.enemies && seat.ring < best.ring))
+			{
+				best = seat;
+				haveBest = true;
 			}
 		}
 
-		if (bestBase >= 0)
-		{
-			target = bestCell;
-			dX = bestdX; dY = bestdY; source = bestSrc;
-			bumped = (bestBase != base) || (tryRing != ring);
-			base_out = bestBase;
-			ring = tryRing;
-			found = true;
+		// A free ring-0 seat ends the search; otherwise keep scoring further
+		// rings so an enemy-free slot further out can still win.
+		if (haveBest && best.ring == 0)
+			break;
+	}
 
-			if (bestEnemies > 0)
-				PlayerCountExt::Log("[shift]   no enemy-free base in ring %d; \"%d%s\" has %d\n",
-					tryRing, bestBase + 1, DirNames[tryRing], bestEnemies);
-		}
+	if (haveBest)
+	{
+		target = best.cell;
+		dX = best.dX; dY = best.dY; source = best.src;
+		bumped = (best.base != base) || (best.ring != ring);
+		base_out = best.base;
+		ring = best.ring;
+		found = true;
+
+		if (best.enemies > 0)
+			PlayerCountExt::Log("[shift]   every free slot is contested; \"%d%s\" has %d enemy neighbour(s)\n",
+				best.base + 1, DirNames[best.ring], best.enemies);
 	}
 
 	if (!found)
