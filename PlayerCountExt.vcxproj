@@ -78,6 +78,7 @@
     <ClCompile Include="src\StartPoints.cpp" />
     <ClCompile Include="src\SpawnShift.cpp" />
     <ClCompile Include="src\AllianceFix.cpp" />
+    <ClCompile Include="src\ScoreRecords.cpp" />
     <ClCompile Include="src\AutoAlly.cpp" />
     <ClCompile Include="src\BaseCellTrace.cpp" />
   </ItemGroup>
