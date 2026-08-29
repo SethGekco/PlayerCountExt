@@ -814,7 +814,11 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	struct Seat { int base, ring, dX, dY, enemies; const char* src; PackedCell cell; };
 	Seat best{}; bool haveBest = false;
 
-	for (int tryRing = 0; tryRing < RingCount && !haveBest; ++tryRing)
+	// `found` means the explicit-pick path above already seated this house at
+	// the position the player asked for. Do not second-guess it — dropping this
+	// guard silently discarded explicit picks and reseated those players
+	// elsewhere.
+	for (int tryRing = 0; tryRing < RingCount && !found; ++tryRing)
 	{
 		for (int attempt = 0; attempt < RealStartCount; ++attempt)
 		{
@@ -871,13 +875,15 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			}
 		}
 
-		// A free ring-0 seat ends the search; otherwise keep scoring further
-		// rings so an enemy-free slot further out can still win.
+		// Only a ring-0 seat ends the search. Ending as soon as ANY seat was
+		// found defeated the whole point: the first ring that had a free slot
+		// won regardless of how contested it was, so a clear slot one ring
+		// further out was never even considered.
 		if (haveBest && best.ring == 0)
 			break;
 	}
 
-	if (haveBest)
+	if (haveBest && !found)
 	{
 		target = best.cell;
 		dX = best.dX; dY = best.dY; source = best.src;
