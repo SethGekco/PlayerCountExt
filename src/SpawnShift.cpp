@@ -168,6 +168,86 @@ namespace
 			ClaimedCells[ClaimCount++] = raw;
 	}
 
+	// ── Who is already sitting on each base, and who is friendly ─────────
+	//
+	// With more houses than start positions some houses MUST share a base. Which
+	// ones is entirely our choice, and putting a player's enemy 16 cells away
+	// while a quieter base is free is the worst of the available options.
+	//
+	// Team membership is read from spawn.ini rather than the engine's Allies
+	// bitfield: it is the same source AllianceFix applies from, and it avoids
+	// depending on a HouseClass field offset (YRpp's cell offsets have been
+	// wrong repeatedly on this build, so its house offsets are not trusted
+	// either).
+	constexpr int MaxHouses = 32;
+	constexpr int MaxBases = 64;
+
+	DWORD AllyMask[MaxHouses] = {};
+	DWORD BaseOccupants[MaxBases] = {};
+	bool AllyMaskBuilt = false;
+
+	void BuildAllyMask()
+	{
+		for (int i = 0; i < MaxHouses; ++i)
+			AllyMask[i] = 0;
+
+		static const char* const Suffixes[] =
+		{
+			"One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight",
+			"Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen"
+		};
+
+		for (int i = 0; i < MaxHouses; ++i)
+		{
+			char section[64];
+			std::snprintf(section, sizeof(section), "Multi%d_Alliances", i + 1);
+
+			for (int slot = 0; slot < static_cast<int>(sizeof(Suffixes) / sizeof(Suffixes[0])); ++slot)
+			{
+				char key[64];
+				std::snprintf(key, sizeof(key), "HouseAlly%s", Suffixes[slot]);
+
+				const int v = GetPrivateProfileIntA(section, key, -1, ".\\spawn.ini");
+				if (v >= 0 && v < MaxHouses)
+				{
+					AllyMask[i] |= (1u << v);
+					AllyMask[v] |= (1u << i);   // symmetric, regardless of how it was written
+				}
+			}
+		}
+
+		AllyMaskBuilt = true;
+	}
+
+	// How many houses already on `base` are NOT allied to `houseIndex`.
+	int EnemiesAtBase(int base, int houseIndex)
+	{
+		if (base < 0 || base >= MaxBases || houseIndex < 0 || houseIndex >= MaxHouses)
+			return 0;
+
+		if (!AllyMaskBuilt)
+			BuildAllyMask();
+
+		int enemies = 0;
+		DWORD occupants = BaseOccupants[base];
+		for (int other = 0; occupants; ++other, occupants >>= 1)
+		{
+			if (!(occupants & 1) || other == houseIndex)
+				continue;
+
+			if (!(AllyMask[houseIndex] & (1u << other)))
+				++enemies;
+		}
+
+		return enemies;
+	}
+
+	void OccupyBase(int base, int houseIndex)
+	{
+		if (base >= 0 && base < MaxBases && houseIndex >= 0 && houseIndex < MaxHouses)
+			BaseOccupants[base] |= (1u << houseIndex);
+	}
+
 	// Can a house actually stand on this cell?
 	//
 	// MapClass::IsWithinUsableArea covers both "is this cell on the map at all"
@@ -420,6 +500,22 @@ namespace
 	//
 	// Returns -1 when spawn.ini says nothing about this house, in which case
 	// the caller leaves the engine's own answer alone.
+	// Position of a house in HouseClass::Array. This is also its Multi number
+	// minus one, which is what the alliance sections are keyed by.
+	int HouseArrayIndex(DWORD pHouse)
+	{
+		const auto items = *reinterpret_cast<DWORD* const volatile*>(AddrHouseArrayItems);
+		const int count = *reinterpret_cast<int const volatile*>(AddrHouseArrayCount);
+		if (!items)
+			return -1;
+
+		for (int i = 0; i < count; ++i)
+			if (items[i] == pHouse)
+				return i;
+
+		return -1;
+	}
+
 	int StartIndexFromSpawnIni(DWORD pHouse)
 	{
 		const auto& spawn = PlayerCountExt::SpawnConfig::Get();
@@ -695,9 +791,26 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	// which is strictly worse for that player and for map balance. Sweeping
 	// ring 0 across every base first means shifted slots only ever appear once
 	// the map genuinely has more houses than positions.
+	// Within a ring, prefer the QUIETEST base rather than the first free one.
+	//
+	// Once there are more houses than positions somebody must share a base, but
+	// nothing forced us to seat a player next to an enemy while a friendlier
+	// base sat open — the old loop simply took the first slot that fit. Scoring
+	// every base in the ring and taking the fewest already-seated enemies keeps
+	// teams together and rivals apart, and only ever reorders choices WITHIN a
+	// ring, so real positions are still exhausted before any shifted one.
+	//
+	// Ties break on the original scan order, so this stays deterministic and
+	// every client still computes the same seat.
+	const int selfIndex = HouseArrayIndex(pHouse);
+
 	for (int tryRing = 0; tryRing < RingCount && !found; ++tryRing)
 	{
-		for (int attempt = 0; attempt < RealStartCount && !found; ++attempt)
+		int bestBase = -1, bestEnemies = 0, bestdX = 0, bestdY = 0;
+		const char* bestSrc = "built-in default";
+		PackedCell bestCell{};
+
+		for (int attempt = 0; attempt < RealStartCount; ++attempt)
 		{
 			const int tryBase = (base + attempt) % RealStartCount;
 
@@ -724,13 +837,30 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				continue;
 			}
 
-			target = candidate;
-			dX = cdX; dY = cdY; source = csrc;
-			bumped = (tryBase != base) || (tryRing != ring);
-			base_out = tryBase;
+			const int enemies = EnemiesAtBase(tryBase, selfIndex);
+
+			if (bestBase < 0 || enemies < bestEnemies)
+			{
+				bestBase = tryBase; bestEnemies = enemies;
+				bestCell = candidate; bestdX = cdX; bestdY = cdY; bestSrc = csrc;
+
+				if (enemies == 0)
+					break; // cannot do better in this ring
+			}
+		}
+
+		if (bestBase >= 0)
+		{
+			target = bestCell;
+			dX = bestdX; dY = bestdY; source = bestSrc;
+			bumped = (bestBase != base) || (tryRing != ring);
+			base_out = bestBase;
 			ring = tryRing;
 			found = true;
-			break;
+
+			if (bestEnemies > 0)
+				PlayerCountExt::Log("[shift]   no enemy-free base in ring %d; \"%d%s\" has %d\n",
+					tryRing, bestBase + 1, DirNames[tryRing], bestEnemies);
 		}
 	}
 
@@ -742,6 +872,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	}
 
 	Claim(target.Raw);
+	OccupyBase(base_out, selfIndex);
 
 	if (ring == 0 && !bumped && !hadNoStart)
 	{
@@ -788,6 +919,11 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 
 	// New pass, new stack frame: the cached table pointer is no longer valid.
 	CachedCellTable = 0;
+
+	// Seating is decided fresh each pass, so who sits where must be too.
+	AllyMaskBuilt = false;
+	for (int i = 0; i < MaxBases; ++i)
+		BaseOccupants[i] = 0;
 
 	auto& spawn = PlayerCountExt::SpawnConfig::Get();
 	if (!spawn.Loaded())
