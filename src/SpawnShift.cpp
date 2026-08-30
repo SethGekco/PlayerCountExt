@@ -1094,6 +1094,11 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			if (IsClaimed(candidate.Raw) || !CellIsUsable(candidate.Raw))
 				continue;
 
+			// Shifted slots must be buildable; the map's own position is taken
+			// on trust (see the sweep above).
+			if (tryRing > 0 && !CellHasBuildingRoom(candidate.Raw))
+				continue;
+
 			target = candidate;
 			dX = cdX; dY = cdY; source = csrc;
 			bumped = true;
@@ -1204,7 +1209,16 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			// A cell that cannot host a base is worse than a further one that
 			// can — a player who cannot deploy is out of the game. On the
 			// first sweep these are skipped entirely.
-			if (requireBuildRoom)
+			// Ring 0 is the MAP'S OWN start position, not something we invented.
+			// The author shipped a working base there, so if our test rejects it
+			// the test is wrong, not the map. Validate only the shifted slots we
+			// made up.
+			//
+			// Rejecting real positions was actively harmful: it displaced players
+			// off spawns they had explicitly chosen and pushed everyone onto
+			// whichever base still had valid shifted cells - eight of sixteen
+			// houses onto base 6 in one game.
+			if (requireBuildRoom && tryRing > 0)
 			{
 				const RoomVerdict verdict = EvaluateBuildingRoom(candidate.Raw);
 				if (verdict != RoomVerdict::Ok && verdict != RoomVerdict::NoCellData)
