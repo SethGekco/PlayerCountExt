@@ -139,18 +139,15 @@ namespace
 	// us?" without reasoning about it.
 	constexpr bool ApplyShift = true;
 
-	// ── BISECT SWITCH ─────────────────────────────────────────────────────
-	// Enemy-aware seating. A deterministic Fatal Error appeared with the commit
-	// that introduced it and has survived three attempted fixes aimed at other
-	// causes, so it is now switchable rather than reasoned about.
+	// Enemy-aware seating. Kept switchable because it earned its keep once:
+	// a deterministic Fatal Error was wrongly pinned on this change and three
+	// fixes were aimed at it before the switch showed the crash persisted with
+	// it off. The cause turned out to be a co-loaded DLL rebuilt the same
+	// evening (MirageTreesExt), not anything here.
 	//
-	// false restores the previous, known-good behaviour exactly: sweep rings in
-	// order and take the first free usable slot, stopping at the first ring
-	// that yields one. That build placed 16 houses across 6 bases and did not
-	// crash.
-	//
-	// true additionally scores every ring and prefers bases with fewer enemies.
-	constexpr bool PreferQuietBases = false;
+	// false: sweep rings in order, take the first free usable slot.
+	// true:  score every ring and prefer bases with fewer seated enemies.
+	constexpr bool PreferQuietBases = true;
 
 	// Start positions the current map actually declares. Set from the engine's
 	// NumberStartingPoints; until we know it, assume vanilla 8 so ring maths
