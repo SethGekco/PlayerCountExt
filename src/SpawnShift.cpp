@@ -1604,7 +1604,51 @@ DEFINE_HOOK(0x5D6CFB, PlayerCountExt_SpawnShift_BypassBrokenPositionPicker, 0x5)
 	//
 	// [ESP+0x28] is the same slot 0x5D6D30 reads, and the taken branch pushes
 	// nothing between here and there, so the offset is identical.
-	CachedCellTable = R->Stack32(0x28);
+	// Locate the start-cell table by shape rather than by a fixed offset.
+	//
+	// [ESP+0x28] is what the engine itself reads at 0x5D6D30, and nothing
+	// changes ESP between here and there — yet capturing it produced a table
+	// where six bases resolved to three cells (0/2/4 identical, 1/3 identical).
+	// The values were real cell coordinates, so we were reading the engine's
+	// locals at the wrong distance, not garbage.
+	//
+	// So: scan a window of stack slots, treat each as a candidate table, and
+	// accept the first whose first RealStartCount entries are all DISTINCT and
+	// plausible cells. A real start table cannot repeat a cell; the locals that
+	// fooled the fixed offset do. Falls back to the fixed offset if nothing
+	// qualifies, and never discards a table captured at 0x5D6C1D, which reads
+	// the pointer from a context where it is an actual argument.
+	{
+		const int wanted = (RealStartCount > 0 && RealStartCount <= 16) ? RealStartCount : 8;
+		DWORD chosen = 0;
+
+		for (int off = 0x08; off <= 0x60 && !chosen; off += 4)
+		{
+			const auto candidate = reinterpret_cast<const DWORD*>(R->Stack32(off));
+			if (!candidate)
+				continue;
+
+			bool plausible = true;
+			for (int i = 0; i < wanted && plausible; ++i)
+			{
+				PackedCell e; e.Raw = candidate[i];
+				if (e.Cell.X <= 0 || e.Cell.Y <= 0 || e.Cell.X > 1024 || e.Cell.Y > 1024)
+					plausible = false;
+
+				for (int j = 0; j < i && plausible; ++j)
+					if (candidate[j] == candidate[i])
+						plausible = false; // a repeat means this is not the table
+			}
+
+			if (plausible)
+				chosen = reinterpret_cast<DWORD>(candidate);
+		}
+
+		if (chosen)
+			CachedCellTable = chosen;
+		else if (!CachedCellTable)
+			CachedCellTable = R->Stack32(0x28);
+	}
 
 	GET(DWORD, ebx, EBX);
 
