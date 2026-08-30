@@ -510,6 +510,69 @@ namespace
 	//
 	// Returns -1 when spawn.ini says nothing about this house, in which case
 	// the caller leaves the engine's own answer alone.
+	// ── Two houses on one start position ────────────────────────────────
+	//
+	// Picking the same slot as someone else used to be refused at the lobby.
+	// It is now allowed: the first house keeps the exact slot and any others
+	// are moved to a free compass variant OF THE SAME BASE, so "we both picked
+	// 4" puts you both around position 4 rather than scattering one of you
+	// across the map.
+	//
+	// Which variant is chosen is randomised, but it MUST be the same randomness
+	// on every machine or clients place the same house differently and the game
+	// desyncs. So it is derived from spawn.ini's Seed - host-authoritative and
+	// broadcast to everyone - mixed with the base and the house's own index.
+	// Same inputs, same answer, everywhere; different game, different layout.
+	//
+	// Deliberately NOT ScenarioClass::Random: consuming from the game's RNG
+	// during setup shifts every later draw, which is a desync of its own if any
+	// other DLL draws a different number of times.
+	unsigned int MixSeed(unsigned int seed, int base, int houseIndex)
+	{
+		// FNV-1a over the three inputs; cheap and well-spread.
+		unsigned int h = 2166136261u;
+		const unsigned int parts[3] =
+		{
+			seed,
+			static_cast<unsigned int>(base),
+			static_cast<unsigned int>(houseIndex)
+		};
+
+		for (int p = 0; p < 3; ++p)
+		{
+			for (int b = 0; b < 4; ++b)
+			{
+				h ^= (parts[p] >> (b * 8)) & 0xFFu;
+				h *= 16777619u;
+			}
+		}
+
+		return h;
+	}
+
+	// Fills `order` with rings 1..RingCount-1 in a seed-dependent order.
+	// Ring 0 is excluded: it is the exact slot, and the caller has already
+	// found it taken.
+	void ShuffledRings(int order[], unsigned int seed, int base, int houseIndex)
+	{
+		const int count = RingCount - 1;
+		for (int i = 0; i < count; ++i)
+			order[i] = i + 1;
+
+		// Fisher-Yates driven by a deterministic LCG, so the permutation is a
+		// pure function of the seed inputs.
+		unsigned int state = MixSeed(seed, base, houseIndex) | 1u;
+		for (int i = count - 1; i > 0; --i)
+		{
+			state = state * 1664525u + 1013904223u;
+			const int j = static_cast<int>((state >> 16) % static_cast<unsigned int>(i + 1));
+
+			const int tmp = order[i];
+			order[i] = order[j];
+			order[j] = tmp;
+		}
+	}
+
 	// Position of a house in HouseClass::Array. This is also its Multi number
 	// minus one, which is what the alliance sections are keyed by.
 	int HouseArrayIndex(DWORD pHouse)
@@ -795,6 +858,70 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				PlayerCountExt::Log("[shift]   \"%d%s\" clamped to %d cells (map edge)\n",
 					base + 1, DirNames[ring], d);
 		}
+	}
+
+	// The exact slot was taken — another house picked it first, or the whole
+	// direction was unusable. Stay on the SAME base and take a free compass
+	// variant of it, chosen deterministically from the shared seed.
+	//
+	// This is what makes "we both picked 4" work: one player keeps 4 and the
+	// other lands on some 4X, near where they asked to be, instead of being
+	// exiled to a different base. Which variant they get varies per game but is
+	// identical on every client.
+	//
+	// Ring 0 is included when the house asked for a shifted slot, so a duplicate
+	// "4NE" can still fall back to plain "4" if that happens to be free.
+	if (explicitChoice && !found)
+	{
+		const unsigned int seed = static_cast<unsigned int>(PlayerCountExt::SpawnConfig::Get().Seed());
+		const int selfIndex = HouseArrayIndex(pHouse);
+
+		const int requestedRing = ring;
+
+		int order[RingCount];
+		ShuffledRings(order, seed, base, selfIndex);
+
+		// Try the shuffled shifted rings, then ring 0 as a last resort.
+		for (int attempt = 0; attempt <= RingCount - 1 && !found; ++attempt)
+		{
+			const int tryRing = (attempt < RingCount - 1) ? order[attempt] : 0;
+			if (tryRing == requestedRing)
+				continue; // already established as unavailable
+
+			PackedCell candidate;
+			candidate.Raw = table[base];
+			int cdX = 0, cdY = 0;
+			const char* csrc = "built-in default";
+
+			if (tryRing > 0)
+			{
+				ResolveOffset(base, tryRing, cdX, cdY, csrc);
+				candidate.Cell.X = static_cast<short>(candidate.Cell.X + cdX);
+				candidate.Cell.Y = static_cast<short>(candidate.Cell.Y + cdY);
+			}
+
+			if (IsClaimed(candidate.Raw) || !CellIsUsable(candidate.Raw))
+				continue;
+
+			target = candidate;
+			dX = cdX; dY = cdY; source = csrc;
+			bumped = true;
+			base_out = base;
+			ring = tryRing;
+			found = true;
+
+			PlayerCountExt::Log("[shift]   \"%d%s\" was taken; sharing base %d as \"%d%s\" "
+				"(seeded from spawn.ini Seed=%u, identical on every client)\n",
+				base + 1, DirNames[requestedRing], base + 1,
+				base + 1, DirNames[tryRing], seed);
+		}
+
+		// Every slot on this base is occupied. Fall through to the general
+		// search, which is the "too many players" case the user expects to
+		// behave normally.
+		if (!found)
+			PlayerCountExt::Log("[shift]   base %d is full; falling back to the general search\n",
+				base + 1);
 	}
 
 	// Otherwise (or if even distance 1 was unusable): try later rings of this
