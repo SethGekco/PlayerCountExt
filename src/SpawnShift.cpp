@@ -258,6 +258,24 @@ namespace
 			BaseOccupants[base] |= (1u << houseIndex);
 	}
 
+	// How crowded a base already is, regardless of who is on it.
+	//
+	// Avoiding enemies is not enough on its own: in a 2v14 nearly every base is
+	// enemy-free for the AI, so scoring purely on enemies put SEVEN of them on
+	// one position while another had one. Crowding is the tiebreaker that
+	// spreads allies out.
+	int HousesAtBase(int base)
+	{
+		if (base < 0 || base >= MaxBases)
+			return 0;
+
+		int n = 0;
+		for (DWORD bits = BaseOccupants[base]; bits; bits >>= 1)
+			n += static_cast<int>(bits & 1);
+
+		return n;
+	}
+
 	// Can a house actually stand on this cell?
 	//
 	// MapClass::IsWithinUsableArea covers both "is this cell on the map at all"
@@ -510,6 +528,84 @@ namespace
 	//
 	// Returns -1 when spawn.ini says nothing about this house, in which case
 	// the caller leaves the engine's own answer alone.
+	// ── Is there room to actually BUILD here? ───────────────────────────
+	//
+	// IsWithinUsableArea answers "can something stand on this cell", which is
+	// not the same question as "can a construction yard go here". A spawn on a
+	// cliff ledge passes the first test and fails the second: the MCV lands,
+	// cannot deploy, and cannot drive off the ledge either.
+	//
+	// The cheap, reliable proxy is FLATNESS. A building needs a contiguous
+	// patch at one height; cliffs, ramps and shorelines all show up as a change
+	// in cell level. Checking a block around the candidate rejects ledges
+	// without needing the pathfinding zones (which do not exist this early) or
+	// a full flood fill.
+	//
+	// Level is at CellClass +0x11B — read straight out of the engine's own
+	// IsClearToMove, which does `movsx ecx, BYTE PTR [esi+0x11b]` at 0x4834EF.
+	// It is signed.
+	constexpr int BuildRoomRadius = 2; // a 5x5 patch: CY footprint plus margin
+
+	DWORD CellPointerAt(int x, int y)
+	{
+		const DWORD arrayBase = *reinterpret_cast<DWORD const volatile*>(AddrMapClass + 0x13C);
+		const DWORD bound = *reinterpret_cast<DWORD const volatile*>(AddrMapClass + 0x140);
+		if (!arrayBase || !bound || x < 0 || y < 0)
+			return 0;
+
+		// The row stride is NOT reliably 512 — MapSizeExt rescales it — so
+		// derive it from the bound rather than assuming.
+		int shift = 0;
+		while ((1u << (2 * (shift + 1))) <= bound && shift < 15)
+			++shift;
+
+		const DWORD index = (static_cast<DWORD>(y) << shift) + static_cast<DWORD>(x);
+		if (index >= bound)
+			return 0;
+
+		return *reinterpret_cast<DWORD const volatile*>(arrayBase + index * 4);
+	}
+
+	bool CellHasBuildingRoom(DWORD raw)
+	{
+		PackedCell c;
+		c.Raw = raw;
+
+		const DWORD centre = CellPointerAt(c.Cell.X, c.Cell.Y);
+		if (!centre)
+			return true; // no cell data (pass 1) — fail OPEN, see below
+
+		const int level = static_cast<signed char>(
+			*reinterpret_cast<BYTE const volatile*>(centre + 0x11B));
+
+		for (int dy = -BuildRoomRadius; dy <= BuildRoomRadius; ++dy)
+		{
+			for (int dx = -BuildRoomRadius; dx <= BuildRoomRadius; ++dx)
+			{
+				if (!dx && !dy)
+					continue;
+
+				const DWORD pCell = CellPointerAt(c.Cell.X + dx, c.Cell.Y + dy);
+				if (!pCell)
+					return false; // off the map — no room by definition
+
+				const int otherLevel = static_cast<signed char>(
+					*reinterpret_cast<BYTE const volatile*>(pCell + 0x11B));
+
+				if (otherLevel != level)
+					return false; // a step in height: cliff, ramp or shore
+
+				PackedCell neighbour;
+				neighbour.Cell.X = static_cast<short>(c.Cell.X + dx);
+				neighbour.Cell.Y = static_cast<short>(c.Cell.Y + dy);
+				if (!CellIsUsable(neighbour.Raw))
+					return false;
+			}
+		}
+
+		return true;
+	}
+
 	// ── Two houses on one start position ────────────────────────────────
 	//
 	// Picking the same slot as someone else used to be refused at the lobby.
@@ -959,6 +1055,15 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	struct Seat { int base, ring, dX, dY, enemies; const char* src; PackedCell cell; };
 	Seat best{}; bool haveBest = false;
 
+	// Two sweeps. The first demands room to build; if every slot on the map
+	// fails that (a genuinely cramped map, or terrain we are reading wrongly),
+	// the second drops the requirement rather than leaving the house unplaced.
+	//
+	// Fail-open is deliberate: a bad spawn is playable, no spawn is not.
+	for (int strictness = 0; strictness < 2 && !found; ++strictness)
+	{
+	const bool requireBuildRoom = (strictness == 0);
+
 	// `found` means the explicit-pick path above already seated this house at
 	// the position the player asked for. Do not second-guess it — dropping this
 	// guard silently discarded explicit picks and reseated those players
@@ -1000,6 +1105,17 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				break;
 			}
 
+			// A cell that cannot host a base is worse than a further one that
+			// can — a player who cannot deploy is out of the game. On the
+			// first sweep these are skipped entirely.
+			if (requireBuildRoom && !CellHasBuildingRoom(candidate.Raw))
+			{
+				PlayerCountExt::Log("[shift]   skip \"%d%s\" (%d,%d) — no room to build "
+					"(cliff, shore or ramp)\n",
+					tryBase + 1, DirNames[tryRing], candidate.Cell.X, candidate.Cell.Y);
+				continue;
+			}
+
 			const Seat seat{ tryBase, tryRing, cdX, cdY,
 				EnemiesAtBase(tryBase, selfIndex), csrc, candidate };
 
@@ -1007,21 +1123,34 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			// because rule 1 outranks everything.
 			if (tryRing == 0)
 			{
-				if (!haveBest || seat.enemies < best.enemies)
+				// No early exit on enemies == 0: with a large allied team most
+				// bases score zero, and taking the first one stacked everybody
+				// onto it. Crowding decides between equals.
+				const int crowding = HousesAtBase(tryBase);
+				const int bestCrowding = haveBest ? HousesAtBase(best.base) : 0;
+
+				if (!haveBest
+					|| seat.enemies < best.enemies
+					|| (seat.enemies == best.enemies && crowding < bestCrowding))
 				{
 					best = seat;
 					haveBest = true;
-					if (seat.enemies == 0)
-						break;
 				}
 
 				continue;
 			}
 
-			// Overflow: fewest enemies wins outright, ring only breaks ties.
+			// Overflow ordering: enemies, then crowding, then ring. Crowding
+			// matters because enemy-avoidance alone lets allies stack up on one
+			// base while others sit nearly empty.
+			const int crowding = HousesAtBase(tryBase);
+			const int bestCrowding = haveBest ? HousesAtBase(best.base) : 0;
+
 			if (!haveBest
 				|| seat.enemies < best.enemies
-				|| (seat.enemies == best.enemies && seat.ring < best.ring))
+				|| (seat.enemies == best.enemies && crowding < bestCrowding)
+				|| (seat.enemies == best.enemies && crowding == bestCrowding
+					&& seat.ring < best.ring))
 			{
 				best = seat;
 				haveBest = true;
@@ -1047,6 +1176,10 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			PlayerCountExt::Log("[shift]   every free slot is contested; \"%d%s\" has %d enemy neighbour(s)\n",
 				best.base + 1, DirNames[best.ring], best.enemies);
 	}
+
+	if (!found && strictness == 0)
+		PlayerCountExt::Log("[shift]   nowhere with room to build; retrying without that requirement\n");
+	} // strictness
 
 	if (!found)
 	{
