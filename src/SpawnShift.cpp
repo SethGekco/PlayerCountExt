@@ -936,6 +936,26 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	// reachability check can only live here if there is. Read-only.
 	if (ClaimCount == 0)
 	{
+		// Dump the captured start-cell table verbatim.
+		//
+		// A run showed six bases resolving to only three distinct cells (bases
+		// 1/3/5 all reading the same one), which is impossible for a real map
+		// and makes every base-relative decision meaningless. StartingPoints
+		// held six distinct entries at the same moment, so the fault is in what
+		// we capture at [ESP+0x28], not in the scenario. Print it rather than
+		// reason about it.
+		{
+			const auto dump = reinterpret_cast<const DWORD*>(CachedCellTable);
+			char line[256]; int n = 0;
+			n += std::snprintf(line + n, sizeof(line) - n, "[shift] captured table @0x%08X:", CachedCellTable);
+			for (int i = 0; i < RealStartCount && i < 12 && n < 200; ++i)
+			{
+				PackedCell e; e.Raw = dump[i];
+				n += std::snprintf(line + n, sizeof(line) - n, " [%d]=(%d,%d)", i, e.Cell.X, e.Cell.Y);
+			}
+			PlayerCountExt::Log("%s  (RealStartCount=%d)\n", line, RealStartCount);
+		}
+
 		PlayerCountExt::ProbeCellTerrain("at spawn assignment (0x5D6D3F)", had.Raw);
 
 		// NOTE: alliances are deliberately NOT applied here. This hook runs
