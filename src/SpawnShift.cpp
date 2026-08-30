@@ -1623,45 +1623,73 @@ DEFINE_HOOK(0x5D6CFB, PlayerCountExt_SpawnShift_BypassBrokenPositionPicker, 0x5)
 	// pair of candidates beats a scan, which will keep finding false positives
 	// whenever a small integer lands in the window.
 	{
-		auto plausibleTable = [](DWORD ptr, int wanted) -> bool
+		// How many of the first `wanted` entries are distinct, plausible cells.
+		// 0 means "not a table at all"; `wanted` means a perfect one. Anything
+		// between is usable but will place people badly, so it is worth saying
+		// out loud.
+		//
+		// ⚠ The range check is what stops this dereferencing garbage. An earlier
+		// version scanned the stack accepting any non-zero slot, and a slot
+		// holding the integer 1 was read as a pointer — an instant access
+		// violation.
+		auto TableDistinctCells = [](DWORD ptr, int wanted) -> int
 		{
-			// Must look like a heap/data address before we touch it.
 			if (ptr < 0x10000 || ptr >= 0x80000000 || (ptr & 3))
-				return false;
+				return 0;
 
 			const auto entries = reinterpret_cast<const DWORD*>(ptr);
+			int distinct = 0;
+
 			for (int i = 0; i < wanted; ++i)
 			{
 				PackedCell e; e.Raw = entries[i];
 				if (e.Cell.X <= 0 || e.Cell.Y <= 0 || e.Cell.X > 1024 || e.Cell.Y > 1024)
-					return false;
+					return 0; // not cell-shaped: reject the whole candidate
 
-				// A real start table never lists the same cell twice; the
-				// locals that fooled the fixed offset do.
-				for (int j = 0; j < i; ++j)
-					if (entries[j] == entries[i])
-						return false;
+				bool repeat = false;
+				for (int j = 0; j < i && !repeat; ++j)
+					repeat = (entries[j] == entries[i]);
+
+				if (!repeat)
+					++distinct;
 			}
 
-			return true;
+			return distinct;
 		};
 
 		const int wanted = (RealStartCount > 0 && RealStartCount <= 16) ? RealStartCount : 8;
 		const int offsets[] = { 0x28, 0x10 };
 
+		// Score rather than accept/reject. Demanding a PERFECT table meant that
+		// when neither offset produced one we kept no table at all — and with no
+		// table the shift does nothing, so every house stayed on whatever cell
+		// the engine handed it and sixteen players spawned on top of each other.
+		// An imperfect table still spreads people out; no table is catastrophic.
+		DWORD bestPtr = 0; int bestDistinct = -1, bestOffset = 0;
+
 		for (int k = 0; k < 2; ++k)
 		{
 			const DWORD candidate = R->Stack32(offsets[k]);
-			if (plausibleTable(candidate, wanted))
-			{
-				if (CachedCellTable != candidate)
-					PlayerCountExt::Log("[shift] start-cell table @0x%08X (stack +0x%02X)\n",
-						candidate, offsets[k]);
+			const int distinct = TableDistinctCells(candidate, wanted);
 
-				CachedCellTable = candidate;
-				break;
+			if (distinct > bestDistinct)
+			{
+				bestDistinct = distinct;
+				bestPtr = candidate;
+				bestOffset = offsets[k];
 			}
 		}
+
+		if (bestPtr && bestDistinct > 0 && CachedCellTable != bestPtr)
+		{
+			PlayerCountExt::Log("[shift] start-cell table @0x%08X (stack +0x%02X): "
+				"%d of %d entries distinct%s\n",
+				bestPtr, bestOffset, bestDistinct, wanted,
+				bestDistinct < wanted ? "  <-- ALIASED, spread will be poor" : "");
+		}
+
+		if (bestPtr && bestDistinct > 0)
+			CachedCellTable = bestPtr;
 	}
 
 	GET(DWORD, ebx, EBX);
