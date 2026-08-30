@@ -597,14 +597,21 @@ namespace
 	// as it has seen enough, so the cost is capped regardless of map size.
 	constexpr int MinConnectedCells = 160;
 
-	bool CellHasBuildingRoom(DWORD raw)
+	// Reason codes so the log can distinguish which half of the test bound.
+	// Tuning either threshold blind is how you end up with six houses failing
+	// open and no idea whether the footprint or the connectivity did it.
+	enum class RoomVerdict { Ok, NoCellData, Footprint, TooEnclosed };
+
+	int LastConnectedCells = 0;
+
+	RoomVerdict EvaluateBuildingRoom(DWORD raw)
 	{
 		PackedCell c;
 		c.Raw = raw;
 
 		const DWORD centre = CellPointerAt(c.Cell.X, c.Cell.Y);
 		if (!centre)
-			return true; // no cell data yet (pass 1) — fail OPEN
+			return RoomVerdict::NoCellData; // pass 1 — fail OPEN
 
 		// 1. The construction yard footprint must be flat and drivable.
 		const int level = static_cast<signed char>(
@@ -616,13 +623,13 @@ namespace
 			{
 				const DWORD pCell = CellPointerAt(c.Cell.X + dx, c.Cell.Y + dy);
 				if (!pCell)
-					return false;
+					return RoomVerdict::Footprint;
 
 				const int otherLevel = static_cast<signed char>(
 					*reinterpret_cast<BYTE const volatile*>(pCell + 0x11B));
 
 				if (otherLevel != level || !CellIsDrivable(c.Cell.X + dx, c.Cell.Y + dy))
-					return false;
+					return RoomVerdict::Footprint;
 			}
 		}
 
@@ -661,7 +668,14 @@ namespace
 			}
 		}
 
-		return seenCount >= MinConnectedCells;
+		LastConnectedCells = seenCount;
+		return (seenCount >= MinConnectedCells) ? RoomVerdict::Ok : RoomVerdict::TooEnclosed;
+	}
+
+	bool CellHasBuildingRoom(DWORD raw)
+	{
+		const RoomVerdict v = EvaluateBuildingRoom(raw);
+		return v == RoomVerdict::Ok || v == RoomVerdict::NoCellData;
 	}
 
 	// ── Two houses on one start position ────────────────────────────────
@@ -1166,12 +1180,21 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			// A cell that cannot host a base is worse than a further one that
 			// can — a player who cannot deploy is out of the game. On the
 			// first sweep these are skipped entirely.
-			if (requireBuildRoom && !CellHasBuildingRoom(candidate.Raw))
+			if (requireBuildRoom)
 			{
-				PlayerCountExt::Log("[shift]   skip \"%d%s\" (%d,%d) — no room to build "
-					"(cliff, shore or ramp)\n",
-					tryBase + 1, DirNames[tryRing], candidate.Cell.X, candidate.Cell.Y);
-				continue;
+				const RoomVerdict verdict = EvaluateBuildingRoom(candidate.Raw);
+				if (verdict != RoomVerdict::Ok && verdict != RoomVerdict::NoCellData)
+				{
+					PlayerCountExt::Log("[shift]   skip \"%d%s\" (%d,%d) — %s\n",
+						tryBase + 1, DirNames[tryRing], candidate.Cell.X, candidate.Cell.Y,
+						verdict == RoomVerdict::Footprint
+							? "footprint not flat/drivable"
+							: "too enclosed to build in");
+					if (verdict == RoomVerdict::TooEnclosed)
+						PlayerCountExt::Log("[shift]     (only %d connected drivable cells, want %d)\n",
+							LastConnectedCells, MinConnectedCells);
+					continue;
+				}
 			}
 
 			const Seat seat{ tryBase, tryRing, cdX, cdY,
