@@ -566,6 +566,37 @@ namespace
 		return *reinterpret_cast<DWORD const volatile*>(arrayBase + index * 4);
 	}
 
+	// CellClass::CanThisExistHere(SpeedType, BuildingTypeClass*, HouseClass*)
+	// — YRpp CellClass.h, verified as a real function at 0x47C620 rather than a
+	// stub. With a null type and owner this asks the plain terrain question:
+	// could a ground vehicle of this SpeedType occupy this cell.
+	using CanThisExistHere_t = bool (__thiscall*)(void*, int, void*, void*);
+	constexpr DWORD AddrCanThisExistHere = 0x47C620;
+	constexpr int SpeedTypeTrack = 1;
+
+	bool CellIsDrivable(int x, int y)
+	{
+		const DWORD pCell = CellPointerAt(x, y);
+		if (!pCell)
+			return false;
+
+		const auto fn = reinterpret_cast<CanThisExistHere_t>(AddrCanThisExistHere);
+		return fn(reinterpret_cast<void*>(pCell), SpeedTypeTrack, nullptr, nullptr);
+	}
+
+	// A spawn needs somewhere to build AND somewhere to go.
+	//
+	// Flatness alone was not enough: it rejects cliff FACES but happily accepts
+	// the flat top of a plateau, which is how a player ended up unable to
+	// deploy and unable to drive off. What actually distinguishes a usable
+	// spawn is how much connected drivable ground it touches — a ledge, a
+	// pillar top and a tiny island all fail that, whatever their flatness.
+	//
+	// So: a flat immediate footprint for the construction yard, plus a bounded
+	// flood fill proving the cell opens onto real space. The fill stops as soon
+	// as it has seen enough, so the cost is capped regardless of map size.
+	constexpr int MinConnectedCells = 160;
+
 	bool CellHasBuildingRoom(DWORD raw)
 	{
 		PackedCell c;
@@ -573,8 +604,9 @@ namespace
 
 		const DWORD centre = CellPointerAt(c.Cell.X, c.Cell.Y);
 		if (!centre)
-			return true; // no cell data (pass 1) — fail OPEN, see below
+			return true; // no cell data yet (pass 1) — fail OPEN
 
+		// 1. The construction yard footprint must be flat and drivable.
 		const int level = static_cast<signed char>(
 			*reinterpret_cast<BYTE const volatile*>(centre + 0x11B));
 
@@ -582,28 +614,54 @@ namespace
 		{
 			for (int dx = -BuildRoomRadius; dx <= BuildRoomRadius; ++dx)
 			{
-				if (!dx && !dy)
-					continue;
-
 				const DWORD pCell = CellPointerAt(c.Cell.X + dx, c.Cell.Y + dy);
 				if (!pCell)
-					return false; // off the map — no room by definition
+					return false;
 
 				const int otherLevel = static_cast<signed char>(
 					*reinterpret_cast<BYTE const volatile*>(pCell + 0x11B));
 
-				if (otherLevel != level)
-					return false; // a step in height: cliff, ramp or shore
-
-				PackedCell neighbour;
-				neighbour.Cell.X = static_cast<short>(c.Cell.X + dx);
-				neighbour.Cell.Y = static_cast<short>(c.Cell.Y + dy);
-				if (!CellIsUsable(neighbour.Raw))
+				if (otherLevel != level || !CellIsDrivable(c.Cell.X + dx, c.Cell.Y + dy))
 					return false;
 			}
 		}
 
-		return true;
+		// 2. It must open onto enough connected drivable ground that a player
+		//    is not marooned on a ledge or a pillar.
+		DWORD seen[MinConnectedCells];
+		int seenCount = 0, head = 0;
+
+		seen[seenCount++] = raw;
+
+		while (head < seenCount && seenCount < MinConnectedCells)
+		{
+			PackedCell cur;
+			cur.Raw = seen[head++];
+
+			for (int dy = -1; dy <= 1 && seenCount < MinConnectedCells; ++dy)
+			{
+				for (int dx = -1; dx <= 1 && seenCount < MinConnectedCells; ++dx)
+				{
+					if (!dx && !dy)
+						continue;
+
+					PackedCell next;
+					next.Cell.X = static_cast<short>(cur.Cell.X + dx);
+					next.Cell.Y = static_cast<short>(cur.Cell.Y + dy);
+
+					bool already = false;
+					for (int i = 0; i < seenCount && !already; ++i)
+						already = (seen[i] == next.Raw);
+
+					if (already || !CellIsDrivable(next.Cell.X, next.Cell.Y))
+						continue;
+
+					seen[seenCount++] = next.Raw;
+				}
+			}
+		}
+
+		return seenCount >= MinConnectedCells;
 	}
 
 	// ── Two houses on one start position ────────────────────────────────
@@ -1199,6 +1257,17 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		// lands on base 0 ring 0 with nothing "changed", and returning early
 		// left it holding its original garbage cell — it then spawned nothing,
 		// which is precisely why the 9th player kept not appearing.
+		//
+		// This is the path an honoured pick takes when the engine already had
+		// it right. The seat came out of the search above, which applies the
+		// build-room filter, so it has been validated — but log if it somehow
+		// has not, because a silent cliff spawn is exactly what took two rounds
+		// to find last time.
+		if (!CellHasBuildingRoom(target.Raw))
+			PlayerCountExt::Log("[shift] house@0x%08X — WARNING: seated at (%d,%d) which reports "
+				"no room to build; the filter let it through\n",
+				pHouse, target.Cell.X, target.Cell.Y);
+
 		return 0;
 	}
 
