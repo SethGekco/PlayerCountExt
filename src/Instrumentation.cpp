@@ -295,13 +295,11 @@ DEFINE_HOOK(0x688378, PlayerCountExt_AssignHouses_Exit, 0x5)
 
 	PlayerCountExt::Log("=== [instr] AssignHouses done ===\n\n");
 
-	// NOTE: do NOT call into the engine from here. This hook's stolen bytes are
-	//   688378:  pop edi / pop esi / add esp,0x4c
-	// and a hook window containing ESP arithmetic cannot safely host deep calls
-	// — the alliance pass lived here briefly and its 184 MakeAlly calls (each
-	// opening `sub esp,0xa8`) left the stack skewed by a byte, ending in a
-	// vtable dispatch to garbage. It now runs from 0x5D6D3F, whose stolen bytes
-	// are a plain `mov eax,ds:[..]`. Keep this hook observational.
+	// Team alliances. This seam ran 184 MakeAlly calls without trouble for
+	// weeks; moving them to 0x5D6D3F, inside the engine's per-house scenario
+	// loop, crashed deterministically instead. Between loops beats mid-loop,
+	// whatever the stolen bytes look like.
+	PlayerCountExt::ApplyAlliancesFromSpawnIni("AssignHouses exit (0x688378)");
 
 	return 0; // continue original code
 }
