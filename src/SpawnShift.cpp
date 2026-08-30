@@ -139,6 +139,19 @@ namespace
 	// us?" without reasoning about it.
 	constexpr bool ApplyShift = true;
 
+	// ── BISECT SWITCH ─────────────────────────────────────────────────────
+	// Enemy-aware seating. A deterministic Fatal Error appeared with the commit
+	// that introduced it and has survived three attempted fixes aimed at other
+	// causes, so it is now switchable rather than reasoned about.
+	//
+	// false restores the previous, known-good behaviour exactly: sweep rings in
+	// order and take the first free usable slot, stopping at the first ring
+	// that yields one. That build placed 16 houses across 6 bases and did not
+	// crash.
+	//
+	// true additionally scores every ring and prefers bases with fewer enemies.
+	constexpr bool PreferQuietBases = false;
+
 	// Start positions the current map actually declares. Set from the engine's
 	// NumberStartingPoints; until we know it, assume vanilla 8 so ring maths
 	// never divides by zero.
@@ -858,6 +871,14 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				continue;
 			}
 
+			if (!PreferQuietBases)
+			{
+				// Known-good path: first free usable slot wins outright.
+				best = Seat{ tryBase, tryRing, cdX, cdY, 0, csrc, candidate };
+				haveBest = true;
+				break;
+			}
+
 			const Seat seat{ tryBase, tryRing, cdX, cdY,
 				EnemiesAtBase(tryBase, selfIndex), csrc, candidate };
 
@@ -886,11 +907,9 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			}
 		}
 
-		// Only a ring-0 seat ends the search. Ending as soon as ANY seat was
-		// found defeated the whole point: the first ring that had a free slot
-		// won regardless of how contested it was, so a clear slot one ring
-		// further out was never even considered.
-		if (haveBest && best.ring == 0)
+		// With scoring off, any seat ends the search (the old behaviour). With it
+		// on, only a ring-0 seat does, so a clear slot further out can still win.
+		if (haveBest && (!PreferQuietBases || best.ring == 0))
 			break;
 	}
 
