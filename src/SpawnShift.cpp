@@ -544,7 +544,19 @@ namespace
 	// Level is at CellClass +0x11B — read straight out of the engine's own
 	// IsClearToMove, which does `movsx ecx, BYTE PTR [esi+0x11b]` at 0x4834EF.
 	// It is signed.
-	constexpr int BuildRoomRadius = 2; // a 5x5 patch: CY footprint plus margin
+	// A construction yard is 3x3, so that is what the patch must guarantee.
+	//
+	// This was 2 (a 5x5 patch, "footprint plus margin") and it was far too
+	// strict: it demanded 25 cells at identical level, which almost no ring
+	// position on a real map satisfies. Measured over one 16-player game it
+	// rejected 179 candidates - every rejection in the run - and left six of
+	// sixteen houses with no valid slot at all, falling through to the
+	// unguarded sweep. One of those six landed on a cliff, which is the very
+	// thing the check exists to prevent.
+	//
+	// Asking for margin made spawns WORSE, because a house that fails the test
+	// everywhere gets no protection at all rather than slightly less.
+	constexpr int BuildRoomRadius = 1;
 
 	DWORD CellPointerAt(int x, int y)
 	{
