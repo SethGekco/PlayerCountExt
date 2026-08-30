@@ -1604,50 +1604,64 @@ DEFINE_HOOK(0x5D6CFB, PlayerCountExt_SpawnShift_BypassBrokenPositionPicker, 0x5)
 	//
 	// [ESP+0x28] is the same slot 0x5D6D30 reads, and the taken branch pushes
 	// nothing between here and there, so the offset is identical.
-	// Locate the start-cell table by shape rather than by a fixed offset.
+	// The start-cell table pointer, from one of two known-good offsets.
 	//
-	// [ESP+0x28] is what the engine itself reads at 0x5D6D30, and nothing
-	// changes ESP between here and there — yet capturing it produced a table
-	// where six bases resolved to three cells (0/2/4 identical, 1/3 identical).
-	// The values were real cell coordinates, so we were reading the engine's
-	// locals at the wrong distance, not garbage.
+	// The engine reads it at 0x5D6D30 as [ESP+0x28]: the function allocates a
+	// local struct at [esp+0x14] (0x5D6C7B), has 0x688380 fill it, then pushes
+	// esi/ebx/ebp/edi, so by our hook that field sits 0x28 up. Reading 0x28
+	// nonetheless produced a table where six bases resolved to three cells,
+	// while a crash dump showed the genuine pointer at Stack(0x10) — 0x18 away,
+	// a Syringe stack-base discrepancy rather than a mistake in the frame
+	// arithmetic.
 	//
-	// So: scan a window of stack slots, treat each as a candidate table, and
-	// accept the first whose first RealStartCount entries are all DISTINCT and
-	// plausible cells. A real start table cannot repeat a cell; the locals that
-	// fooled the fixed offset do. Falls back to the fixed offset if nothing
-	// qualifies, and never discards a table captured at 0x5D6C1D, which reads
-	// the pointer from a context where it is an actual argument.
+	// So both are tried, most-likely first, and validated before use.
+	//
+	// ⚠ VALIDATE BEFORE DEREFERENCING. An earlier version scanned the stack and
+	// accepted any non-zero slot as a pointer; a slot holding the integer 1
+	// passed that test and the read of [1] was an instant access violation. A
+	// scavenged stack slot needs a range check, not a null check — and a bounded
+	// pair of candidates beats a scan, which will keep finding false positives
+	// whenever a small integer lands in the window.
 	{
-		const int wanted = (RealStartCount > 0 && RealStartCount <= 16) ? RealStartCount : 8;
-		DWORD chosen = 0;
-
-		for (int off = 0x08; off <= 0x60 && !chosen; off += 4)
+		auto plausibleTable = [](DWORD ptr, int wanted) -> bool
 		{
-			const auto candidate = reinterpret_cast<const DWORD*>(R->Stack32(off));
-			if (!candidate)
-				continue;
+			// Must look like a heap/data address before we touch it.
+			if (ptr < 0x10000 || ptr >= 0x80000000 || (ptr & 3))
+				return false;
 
-			bool plausible = true;
-			for (int i = 0; i < wanted && plausible; ++i)
+			const auto entries = reinterpret_cast<const DWORD*>(ptr);
+			for (int i = 0; i < wanted; ++i)
 			{
-				PackedCell e; e.Raw = candidate[i];
+				PackedCell e; e.Raw = entries[i];
 				if (e.Cell.X <= 0 || e.Cell.Y <= 0 || e.Cell.X > 1024 || e.Cell.Y > 1024)
-					plausible = false;
+					return false;
 
-				for (int j = 0; j < i && plausible; ++j)
-					if (candidate[j] == candidate[i])
-						plausible = false; // a repeat means this is not the table
+				// A real start table never lists the same cell twice; the
+				// locals that fooled the fixed offset do.
+				for (int j = 0; j < i; ++j)
+					if (entries[j] == entries[i])
+						return false;
 			}
 
-			if (plausible)
-				chosen = reinterpret_cast<DWORD>(candidate);
-		}
+			return true;
+		};
 
-		if (chosen)
-			CachedCellTable = chosen;
-		else if (!CachedCellTable)
-			CachedCellTable = R->Stack32(0x28);
+		const int wanted = (RealStartCount > 0 && RealStartCount <= 16) ? RealStartCount : 8;
+		const int offsets[] = { 0x28, 0x10 };
+
+		for (int k = 0; k < 2; ++k)
+		{
+			const DWORD candidate = R->Stack32(offsets[k]);
+			if (plausibleTable(candidate, wanted))
+			{
+				if (CachedCellTable != candidate)
+					PlayerCountExt::Log("[shift] start-cell table @0x%08X (stack +0x%02X)\n",
+						candidate, offsets[k]);
+
+				CachedCellTable = candidate;
+				break;
+			}
+		}
 	}
 
 	GET(DWORD, ebx, EBX);
