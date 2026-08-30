@@ -157,6 +157,32 @@ namespace
 	// The engine's start-cell table, captured at 0x5D6C1D (see there).
 	DWORD CachedCellTable = 0;
 
+	// A COPY of the start-cell table, not a pointer to it.
+	//
+	// The authoritative table arrives as a stack argument at 0x5D6C1D, so a
+	// pointer to it is dead the moment that frame unwinds. 0x5D6C1D only fires
+	// for houses already seated in HouseIndices, which happens in pass 1 and not
+	// in pass 2 — so pass 2 was left reading a different structure that merely
+	// looked cell-shaped, giving six bases only three distinct cells (1/3/5 and
+	// 2/4 aliased). Houses then "spread" across base numbers that pointed at the
+	// same ground.
+	//
+	// Copying the values instead of the pointer keeps the good table for the
+	// whole game.
+	constexpr int MaxStartCells = 16;
+	DWORD StartCells[MaxStartCells] = {};
+	int StartCellCount = 0;
+
+	// The table to use: the trusted copy when we have one, else whatever the
+	// later hook managed to find.
+	const DWORD* ActiveCellTable()
+	{
+		if (StartCellCount > 0)
+			return StartCells;
+
+		return reinterpret_cast<const DWORD*>(CachedCellTable);
+	}
+
 	// Base cells already taken this pass, so a second house on the same
 	// position is bumped to the next ring instead of sharing a cell.
 	// Reset once per AssignHouses pass (see the 0x688378 hook).
@@ -302,7 +328,7 @@ namespace
 		if (!CachedCellTable)
 			return -1;
 
-		const auto table = reinterpret_cast<const DWORD*>(CachedCellTable);
+		const auto table = ActiveCellTable();
 		for (int i = 0; i < RealStartCount; ++i)
 			if (table[i] == raw)
 				return i;
@@ -844,6 +870,44 @@ DEFINE_HOOK(0x5D6C1D, PlayerCountExt_SpawnShift_CacheTable, 0x7)
 	// one of them to a free position.
 	CachedCellTable = pTable;
 
+	// Copy it while the frame is still live. This is the only place the real
+	// table is exposed, and only in the pass where houses are seated.
+	if (pTable >= 0x10000 && pTable < 0x80000000 && !(pTable & 3))
+	{
+		const auto entries = reinterpret_cast<const DWORD*>(pTable);
+		const int wanted = (RealStartCount > 0 && RealStartCount <= MaxStartCells)
+			? RealStartCount : 8;
+
+		int distinct = 0;
+		for (int i = 0; i < wanted; ++i)
+		{
+			PackedCell e; e.Raw = entries[i];
+			if (e.Cell.X <= 0 || e.Cell.Y <= 0 || e.Cell.X > 1024 || e.Cell.Y > 1024)
+			{
+				distinct = 0;
+				break;
+			}
+
+			bool repeat = false;
+			for (int j = 0; j < i && !repeat; ++j)
+				repeat = (entries[j] == entries[i]);
+
+			if (!repeat)
+				++distinct;
+		}
+
+		// Only replace a copy we already trust with a better one.
+		if (distinct > StartCellCount)
+		{
+			for (int i = 0; i < wanted; ++i)
+				StartCells[i] = entries[i];
+
+			StartCellCount = distinct;
+			PlayerCountExt::Log("[shift] copied start-cell table from 0x5D6C1D: "
+				"%d of %d entries distinct\n", distinct, wanted);
+		}
+	}
+
 	R->EDX(reinterpret_cast<const DWORD*>(pTable)[engineIndex < 0 ? 0 : engineIndex]);
 	return 0x5D6C24;
 }
@@ -871,7 +935,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 {
 	GET(DWORD, pHouse, EDI);
 
-	if (!pHouse || !CachedCellTable)
+	if (!pHouse || !ActiveCellTable())
 		return 0;
 
 	// Skip Neutral and Special.
@@ -894,7 +958,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	if (RealStartCount <= 0)
 		return 0;
 
-	const auto table = reinterpret_cast<const DWORD*>(CachedCellTable);
+	const auto table = ActiveCellTable();
 	const auto pHomeCell = reinterpret_cast<DWORD*>(pHouse + 0x5490);
 
 	PackedCell had;
@@ -919,7 +983,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 	// A table from a previous invocation points at reused stack. Refuse rather
 	// than compute offsets from whatever is there now.
-	if (!CachedCellTable)
+	if (!ActiveCellTable())
 	{
 		static bool warned = false;
 		if (!warned)
@@ -945,9 +1009,9 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		// we capture at [ESP+0x28], not in the scenario. Print it rather than
 		// reason about it.
 		{
-			const auto dump = reinterpret_cast<const DWORD*>(CachedCellTable);
+			const auto dump = ActiveCellTable();
 			char line[256]; int n = 0;
-			n += std::snprintf(line + n, sizeof(line) - n, "[shift] captured table @0x%08X:", CachedCellTable);
+			n += std::snprintf(line + n, sizeof(line) - n, "[shift] table in use (%s):", StartCellCount > 0 ? "copied from 0x5D6C1D" : "found on the stack");
 			for (int i = 0; i < RealStartCount && i < 12 && n < 200; ++i)
 			{
 				PackedCell e; e.Raw = dump[i];
@@ -1385,7 +1449,7 @@ DEFINE_HOOK(0x688378, PlayerCountExt_SpawnShift_RestoreStartIndex, 0x5)
 	ClaimCount = 0;
 
 	// New pass, new stack frame: the cached table pointer is no longer valid.
-	CachedCellTable = 0;
+	CachedCellTable = 0;   // the pointer dies with the frame; StartCells does not
 
 	// Seating is decided fresh each pass, so who sits where must be too.
 	AllyMaskBuilt = false;
