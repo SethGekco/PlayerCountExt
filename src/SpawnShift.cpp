@@ -1061,12 +1061,23 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		int order[RingCount];
 		ShuffledRings(order, seed, base, selfIndex);
 
-		// Try the shuffled shifted rings, then ring 0 as a last resort.
-		for (int attempt = 0; attempt <= RingCount - 1 && !found; ++attempt)
+		// The REQUESTED ring first, then the shuffled others, then ring 0.
+		//
+		// Trying the request first is not optional. The clamp path above only
+		// runs for ring > 0, so a plain "I want position 4" arrived here with
+		// found == false having never been tested — and this loop skipped the
+		// requested ring as "already established as unavailable". The result
+		// was that every explicit ring-0 pick was displaced to a compass
+		// variant and its real position left free for someone else to take,
+		// which is precisely backwards.
+		for (int attempt = -1; attempt <= RingCount - 1 && !found; ++attempt)
 		{
-			const int tryRing = (attempt < RingCount - 1) ? order[attempt] : 0;
-			if (tryRing == requestedRing)
-				continue; // already established as unavailable
+			const int tryRing = (attempt < 0)
+				? requestedRing
+				: ((attempt < RingCount - 1) ? order[attempt] : 0);
+
+			if (attempt >= 0 && tryRing == requestedRing)
+				continue; // already tried above
 
 			PackedCell candidate;
 			candidate.Raw = table[base];
@@ -1090,10 +1101,11 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			ring = tryRing;
 			found = true;
 
-			PlayerCountExt::Log("[shift]   \"%d%s\" was taken; sharing base %d as \"%d%s\" "
-				"(seeded from spawn.ini Seed=%u, identical on every client)\n",
-				base + 1, DirNames[requestedRing], base + 1,
-				base + 1, DirNames[tryRing], seed);
+			if (tryRing != requestedRing)
+				PlayerCountExt::Log("[shift]   \"%d%s\" was taken; sharing base %d as \"%d%s\" "
+					"(seeded from spawn.ini Seed=%u, identical on every client)\n",
+					base + 1, DirNames[requestedRing], base + 1,
+					base + 1, DirNames[tryRing], seed);
 		}
 
 		// Every slot on this base is occupied. Fall through to the general
