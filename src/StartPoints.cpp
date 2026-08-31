@@ -66,9 +66,9 @@ namespace
 	constexpr int VanillaStarts = 8;
 
 	// How many start positions we can hold in total. The binding limit further
-	// downstream is the 32-bit per-house bitfield (~30 houses), so there is no
-	// value in going far past it.
-	constexpr int MaxStarts = PlayerCountExt::EngineHouseCeiling; // 30
+	// downstream is the 32-bit per-house bitfield, so there is no value in going
+	// past it.
+	constexpr int MaxStarts = PlayerCountExt::EngineHouseCeiling; // 32 houses
 
 	struct Point2D { int X; int Y; };
 

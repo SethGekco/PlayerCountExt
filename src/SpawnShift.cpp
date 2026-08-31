@@ -248,8 +248,11 @@ namespace
 
 		static const char* const Suffixes[] =
 		{
-			"One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight",
-			"Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen"
+			"One", "Two", "Three", "Four", "Five", "Six",
+			"Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve",
+			"Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen",
+			"Nineteen", "Twenty", "TwentyOne", "TwentyTwo", "TwentyThree", "TwentyFour",
+			"TwentyFive", "TwentySix", "TwentySeven", "TwentyEight", "TwentyNine"
 		};
 
 		for (int i = 0; i < MaxHouses; ++i)

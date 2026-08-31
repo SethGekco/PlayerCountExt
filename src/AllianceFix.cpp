@@ -60,8 +60,11 @@ namespace
 	// 16-player game, where one house has fifteen allies.
 	const char* const AllySuffixes[] =
 	{
-		"One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight",
-		"Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen"
+		"One", "Two", "Three", "Four", "Five", "Six",
+		"Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve",
+		"Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen",
+		"Nineteen", "Twenty", "TwentyOne", "TwentyTwo", "TwentyThree", "TwentyFour",
+		"TwentyFive", "TwentySix", "TwentySeven", "TwentyEight", "TwentyNine"
 	};
 
 	constexpr int MaxAllies = sizeof(AllySuffixes) / sizeof(AllySuffixes[0]);

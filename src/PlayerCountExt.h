@@ -19,7 +19,19 @@ namespace PlayerCountExt
 	// sharing alliance/spy bits — corruption, not a crash.
 	//
 	// We do NOT target 30. See DESIGN.md: the first milestone is 9.
-	static constexpr int EngineHouseCeiling = 30;
+	// Players + Neutral + Special must fit in a 32-bit house bitfield.
+	//
+	// Every house set in YR (HouseClass::Allies, AltAllies,
+	// TechnoClass::DisplayProductionTo, CellClass::BaseSpacerOfHouses) does
+	// `1u << ArrayIndex` into a DWORD, so index 32 is the first that does not
+	// exist. On x86 `shl` masks the shift count to 5 bits, so index 32 aliases
+	// onto index 0 — houses would silently begin sharing alliance and spy bits
+	// instead of crashing, which is far harder to notice than a fault.
+	//
+	// 32 total houses is therefore the real ceiling: 30 players, plus Neutral
+	// and Special. Going beyond means widening those bitfields everywhere, a
+	// substantially larger job than the array and loop limits lifted so far.
+	static constexpr int EngineHouseCeiling = 32;
 
 	// Vanilla AI slots. AISlots.Countries[8] @ 0xA8B29C, and the AI creation
 	// loop is bounded by a pointer compare against its end address at 0x6882C5.
