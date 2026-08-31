@@ -221,6 +221,37 @@ namespace
 		return dx * dx + dy * dy;
 	}
 
+	bool IsClaimed(DWORD raw)
+	{
+		for (int i = 0; i < ClaimCount; ++i)
+			if (ClaimedCells[i] == raw)
+				return true;
+		return false;
+	}
+
+	int ClaimedBy[MaxClaims] = {};
+
+	void Claim(DWORD raw, int houseIndex = -1)
+	{
+		if (ClaimCount < MaxClaims)
+		{
+			ClaimedBy[ClaimCount] = houseIndex;
+			ClaimedCells[ClaimCount++] = raw;
+		}
+	}
+
+	// Squared distance between two cells. Squared is enough for comparisons and
+	// avoids a sqrt; cells are small enough that this cannot overflow.
+	int CellDistanceSq(DWORD a, DWORD b)
+	{
+		PackedCell ca; ca.Raw = a;
+		PackedCell cb; cb.Raw = b;
+
+		const int dx = ca.Cell.X - cb.Cell.X;
+		const int dy = ca.Cell.Y - cb.Cell.Y;
+		return dx * dx + dy * dy;
+	}
+
 	// Distance from `raw` to the nearest already-seated ally and enemy.
 	//
 	// Used to place unassigned houses sensibly: teammates should end up near one
@@ -348,6 +379,7 @@ namespace
 
 		return n;
 	}
+
 
 	// Can a house actually stand on this cell?
 	//
