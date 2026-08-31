@@ -48,6 +48,7 @@ namespace
 	constexpr int Missing = INT_MIN;
 
 	int CachedShiftDistance = Missing;
+	int CachedClusterTeams = Missing;
 
 	int ReadInt(void* pINI, const char* key)
 	{
@@ -62,6 +63,11 @@ namespace
 int PlayerCountExt::RulesConfig::ShiftDistance()
 {
 	return CachedShiftDistance;
+}
+
+bool PlayerCountExt::RulesConfig::ClusterTeams()
+{
+	return CachedClusterTeams == Missing ? false : (CachedClusterTeams != 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +108,18 @@ DEFINE_HOOK(0x668BF0, PlayerCountExt_RulesConfig_Read, 0x5)
 	{
 		CachedShiftDistance = distance;
 		PlayerCountExt::Log("[rules] ShiftDistance = %d\n", distance);
+	}
+
+	// Accepts 1/0 as well as true/false — ReadInteger handles yes/no/true/false
+	// via the engine's own parser, so all the usual INI spellings work.
+	const int cluster = ReadInt(pINI, "ClusterTeams");
+	if (cluster != Missing)
+	{
+		CachedClusterTeams = cluster;
+		PlayerCountExt::Log("[rules] ClusterTeams = %s (%s)\n",
+			cluster ? "yes" : "no",
+			cluster ? "teams seated together; some positions may go unused"
+				: "every real position filled first");
 	}
 
 	return 0;

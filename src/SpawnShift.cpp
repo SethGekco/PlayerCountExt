@@ -1383,6 +1383,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	// (base, ring >= 1) pair is scored together and ordered by enemies, then
 	// ring, then base. Ties break on scan order, so this stays deterministic.
 	const int selfIndex = HouseArrayIndex(pHouse);
+	const bool clusterTeams = PlayerCountExt::RulesConfig::ClusterTeams();
 
 	struct Seat { int base, ring, dX, dY, enemies; const char* src; PackedCell cell; };
 	Seat best{}; bool haveBest = false;
@@ -1492,12 +1493,24 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				bool better = !haveBest;
 				if (!better && seat.enemies != best.enemies)
 					better = seat.enemies < best.enemies;
-				else if (!better && crowding != bestCrowding)
-					better = crowding < bestCrowding;
-				else if (!better && enemyD != bestEnemyD)
-					better = enemyD > bestEnemyD;
-				else if (!better && allyD != bestAllyD)
-					better = allyD < bestAllyD;
+				else if (clusterTeams)
+				{
+					if (!better && allyD != bestAllyD)
+						better = allyD < bestAllyD;
+					else if (!better && enemyD != bestEnemyD)
+						better = enemyD > bestEnemyD;
+					else if (!better)
+						better = crowding < bestCrowding;
+				}
+				else
+				{
+					if (!better && crowding != bestCrowding)
+						better = crowding < bestCrowding;
+					else if (!better && enemyD != bestEnemyD)
+						better = enemyD > bestEnemyD;
+					else if (!better && allyD != bestAllyD)
+						better = allyD < bestAllyD;
+				}
 
 				if (better)
 				{
@@ -1524,17 +1537,34 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			int allyD = INT_MAX, enemyD = INT_MAX;
 			NearestTeamDistances(candidate.Raw, selfIndex, allyD, enemyD);
 
+			// STANDARD spreads, TEAM clusters. The only difference is whether
+			// crowding (which pushes houses onto fresh bases) or ally distance
+			// (which pulls them together) is consulted first.
 			bool better = !haveBest;
 			if (!better && seat.enemies != best.enemies)
 				better = seat.enemies < best.enemies;
-			else if (!better && crowding != bestCrowding)
-				better = crowding < bestCrowding;
-			else if (!better && enemyD != bestEnemyD)
-				better = enemyD > bestEnemyD;      // further from rivals
-			else if (!better && allyD != bestAllyD)
-				better = allyD < bestAllyD;        // closer to teammates
-			else if (!better)
-				better = seat.ring < best.ring;
+			else if (clusterTeams)
+			{
+				if (!better && allyD != bestAllyD)
+					better = allyD < bestAllyD;        // sit with your team
+				else if (!better && enemyD != bestEnemyD)
+					better = enemyD > bestEnemyD;
+				else if (!better && seat.ring != best.ring)
+					better = seat.ring < best.ring;
+				else if (!better)
+					better = crowding < bestCrowding;
+			}
+			else
+			{
+				if (!better && crowding != bestCrowding)
+					better = crowding < bestCrowding;  // use every position
+				else if (!better && enemyD != bestEnemyD)
+					better = enemyD > bestEnemyD;
+				else if (!better && allyD != bestAllyD)
+					better = allyD < bestAllyD;
+				else if (!better)
+					better = seat.ring < best.ring;
+			}
 
 			if (better)
 			{
@@ -1547,7 +1577,11 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 		// With scoring off, any seat ends the search (the old behaviour). With it
 		// on, only a ring-0 seat does, so a clear slot further out can still win.
-		if (haveBest && (!PreferQuietBases || best.ring == 0))
+		// In STANDARD a free ring-0 seat ends the search: every real position is
+		// used before any variant. TEAM relaxes exactly that rule, so keep
+		// scoring further rings and let a slot beside an ally beat an untouched
+		// position across the map.
+		if (haveBest && (!PreferQuietBases || (best.ring == 0 && !clusterTeams)))
 			break;
 	}
 
