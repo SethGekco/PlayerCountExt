@@ -222,35 +222,6 @@ namespace
 	}
 
 
-	// Distance from `raw` to the nearest already-seated ally and enemy.
-	//
-	// Used to place unassigned houses sensibly: teammates should end up near one
-	// another and rivals as far apart as the map allows. This only ever chooses
-	// BETWEEN otherwise-equal free slots — it can never leave a position empty
-	// or move anyone off a chosen one, which is the higher rule.
-	void NearestTeamDistances(DWORD raw, int houseIndex, int& allyDistSq, int& enemyDistSq)
-	{
-		allyDistSq = INT_MAX;
-		enemyDistSq = INT_MAX;
-
-		if (!AllyMaskBuilt)
-			BuildAllyMask();
-
-		for (int i = 0; i < ClaimCount; ++i)
-		{
-			const int other = ClaimedBy[i];
-			if (other < 0 || other == houseIndex || other >= MaxHouses)
-				continue;
-
-			const int d = CellDistanceSq(raw, ClaimedCells[i]);
-			const bool allied = houseIndex >= 0 && houseIndex < MaxHouses
-				&& (AllyMask[houseIndex] & (1u << other)) != 0;
-
-			int& slot = allied ? allyDistSq : enemyDistSq;
-			if (d < slot)
-				slot = d;
-		}
-	}
 
 	// ── Who is already sitting on each base, and who is friendly ─────────
 	//
@@ -348,6 +319,36 @@ namespace
 			n += static_cast<int>(bits & 1);
 
 		return n;
+	}
+
+	// Distance from `raw` to the nearest already-seated ally and enemy.
+	//
+	// Used to place unassigned houses sensibly: teammates should end up near one
+	// another and rivals as far apart as the map allows. This only ever chooses
+	// BETWEEN otherwise-equal free slots — it can never leave a position empty
+	// or move anyone off a chosen one, which is the higher rule.
+	void NearestTeamDistances(DWORD raw, int houseIndex, int& allyDistSq, int& enemyDistSq)
+	{
+		allyDistSq = INT_MAX;
+		enemyDistSq = INT_MAX;
+
+		if (!AllyMaskBuilt)
+			BuildAllyMask();
+
+		for (int i = 0; i < ClaimCount; ++i)
+		{
+			const int other = ClaimedBy[i];
+			if (other < 0 || other == houseIndex || other >= MaxHouses)
+				continue;
+
+			const int d = CellDistanceSq(raw, ClaimedCells[i]);
+			const bool allied = houseIndex >= 0 && houseIndex < MaxHouses
+				&& (AllyMask[houseIndex] & (1u << other)) != 0;
+
+			int& slot = allied ? allyDistSq : enemyDistSq;
+			if (d < slot)
+				slot = d;
+		}
 	}
 
 
