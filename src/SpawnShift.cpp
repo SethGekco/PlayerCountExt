@@ -716,6 +716,69 @@ namespace
 		return v == RoomVerdict::Ok || v == RoomVerdict::NoCellData;
 	}
 
+	// Which contender keeps the exact slot when several ask for the same one.
+	//
+	// Previously this was decided by house order, so the first house in
+	// HouseClass::Array always won — which means the human always beat an AI and
+	// a host always beat their ally. Nobody chose that; it was just a
+	// consequence of the iteration order.
+	//
+	// The winner is now drawn from the shared seed, so it is genuinely random
+	// between the contenders while still being identical on every client.
+	// Everyone else falls through to the seeded compass shuffle as before.
+	int KeeperForSlot(int base, int ring)
+	{
+		const auto& spawn = PlayerCountExt::SpawnConfig::Get();
+		if (!spawn.Loaded() || RealStartCount <= 0)
+			return -1;
+
+		const int count = *reinterpret_cast<int const volatile*>(AddrHouseArrayCount);
+
+		auto wantsThisSlot = [&](int houseIndex) -> bool
+		{
+			const auto& h = spawn.House(houseIndex + 1);
+			if (!h.Defined || h.SpawnLocation < 0)
+				return false;
+
+			return (h.SpawnLocation % RealStartCount) == base
+				&& (h.SpawnLocation / RealStartCount) == ring;
+		};
+
+		int contenders = 0;
+		for (int i = 0; i < count; ++i)
+			if (wantsThisSlot(i))
+				++contenders;
+
+		if (contenders == 0)
+			return -1;
+
+		// One asker keeps it outright; no need to consult the seed.
+		if (contenders == 1)
+		{
+			for (int i = 0; i < count; ++i)
+				if (wantsThisSlot(i))
+					return i;
+		}
+
+		const unsigned int seed = static_cast<unsigned int>(spawn.Seed());
+		const int pick = static_cast<int>(
+			MixSeed(seed, base * RingCount + ring, 0) % static_cast<unsigned int>(contenders));
+
+		int k = 0;
+		for (int i = 0; i < count; ++i)
+		{
+			if (!wantsThisSlot(i))
+				continue;
+
+			if (k == pick)
+				return i;
+
+			++k;
+		}
+
+		return -1;
+	}
+
 	// ── Two houses on one start position ────────────────────────────────
 	//
 	// Picking the same slot as someone else used to be refused at the lobby.
@@ -1154,14 +1217,24 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		// was that every explicit ring-0 pick was displaced to a compass
 		// variant and its real position left free for someone else to take,
 		// which is precisely backwards.
-		for (int attempt = -1; attempt <= RingCount - 1 && !found; ++attempt)
+		// Only the drawn keeper may take the exact slot. Everyone else who asked
+		// for it goes straight to the shuffle, so which contender keeps it is
+		// decided by the seed rather than by house order.
+		const bool isKeeper = (KeeperForSlot(base, requestedRing) == selfIndex);
+
+		if (!isKeeper)
+			PlayerCountExt::Log("[shift]   \"%d%s\" drawn by another contender; "
+				"taking a compass variant of base %d instead\n",
+				base + 1, DirNames[requestedRing], base + 1);
+
+		for (int attempt = isKeeper ? -1 : 0; attempt <= RingCount - 1 && !found; ++attempt)
 		{
 			const int tryRing = (attempt < 0)
 				? requestedRing
 				: ((attempt < RingCount - 1) ? order[attempt] : 0);
 
 			if (attempt >= 0 && tryRing == requestedRing)
-				continue; // already tried above
+				continue; // the keeper already had first refusal
 
 			PackedCell candidate;
 			candidate.Raw = table[base];
