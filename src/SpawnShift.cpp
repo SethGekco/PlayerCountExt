@@ -198,10 +198,57 @@ namespace
 		return false;
 	}
 
-	void Claim(DWORD raw)
+	int ClaimedBy[MaxClaims] = {};
+
+	void Claim(DWORD raw, int houseIndex = -1)
 	{
 		if (ClaimCount < MaxClaims)
+		{
+			ClaimedBy[ClaimCount] = houseIndex;
 			ClaimedCells[ClaimCount++] = raw;
+		}
+	}
+
+	// Squared distance between two cells. Squared is enough for comparisons and
+	// avoids a sqrt; cells are small enough that this cannot overflow.
+	int CellDistanceSq(DWORD a, DWORD b)
+	{
+		PackedCell ca; ca.Raw = a;
+		PackedCell cb; cb.Raw = b;
+
+		const int dx = ca.Cell.X - cb.Cell.X;
+		const int dy = ca.Cell.Y - cb.Cell.Y;
+		return dx * dx + dy * dy;
+	}
+
+	// Distance from `raw` to the nearest already-seated ally and enemy.
+	//
+	// Used to place unassigned houses sensibly: teammates should end up near one
+	// another and rivals as far apart as the map allows. This only ever chooses
+	// BETWEEN otherwise-equal free slots — it can never leave a position empty
+	// or move anyone off a chosen one, which is the higher rule.
+	void NearestTeamDistances(DWORD raw, int houseIndex, int& allyDistSq, int& enemyDistSq)
+	{
+		allyDistSq = INT_MAX;
+		enemyDistSq = INT_MAX;
+
+		if (!AllyMaskBuilt)
+			BuildAllyMask();
+
+		for (int i = 0; i < ClaimCount; ++i)
+		{
+			const int other = ClaimedBy[i];
+			if (other < 0 || other == houseIndex || other >= MaxHouses)
+				continue;
+
+			const int d = CellDistanceSq(raw, ClaimedCells[i]);
+			const bool allied = houseIndex >= 0 && houseIndex < MaxHouses
+				&& (AllyMask[houseIndex] & (1u << other)) != 0;
+
+			int& slot = allied ? allyDistSq : enemyDistSq;
+			if (d < slot)
+				slot = d;
+		}
 	}
 
 	// ── Who is already sitting on each base, and who is friendly ─────────
@@ -1235,6 +1282,20 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				"taking a compass variant of base %d instead\n",
 				base + 1, DirNames[requestedRing], base + 1);
 
+		// Two sweeps of THIS base: good ground first, then any free slot.
+		//
+		// A chosen start is a promise. Buildability is a preference for picking
+		// WHICH variant of that position you get — it must never be able to move
+		// you to a different position, because a player who selected 4 and was
+		// sent to 5 has simply had their choice discarded.
+		//
+		// This bit: all eight variants of base 4 failed the filter (that corner
+		// of the map is rough), the base was declared "full" though nothing was
+		// occupying it, and the loser of the draw was exiled to base 5.
+		for (int strict = 0; strict < 2 && !found; ++strict)
+		{
+		const bool preferGoodGround = (strict == 0);
+
 		for (int attempt = isKeeper ? -1 : 0; attempt <= RingCount - 1 && !found; ++attempt)
 		{
 			const int tryRing = (attempt < 0)
@@ -1259,9 +1320,9 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			if (IsClaimed(candidate.Raw) || !CellIsUsable(candidate.Raw))
 				continue;
 
-			// Shifted slots must be buildable; the map's own position is taken
-			// on trust (see the sweep above).
-			if (tryRing > 0 && !CellHasBuildingRoom(candidate.Raw))
+			// Only on the first sweep. On the second, any free slot on this
+			// base beats being moved off the position entirely.
+			if (preferGoodGround && tryRing > 0 && !CellHasBuildingRoom(candidate.Raw))
 				continue;
 
 			target = candidate;
@@ -1278,12 +1339,14 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 					base + 1, DirNames[tryRing], seed);
 		}
 
-		// Every slot on this base is occupied. Fall through to the general
-		// search, which is the "too many players" case the user expects to
-		// behave normally.
+		} // strict
+
+		// Only now is the base genuinely full — every one of its nine slots is
+		// occupied by someone else. That is the "more players than places" case,
+		// where a random position and a shared cell are both acceptable.
 		if (!found)
-			PlayerCountExt::Log("[shift]   base %d is full; falling back to the general search\n",
-				base + 1);
+			PlayerCountExt::Log("[shift]   base %d has all 9 slots occupied; "
+				"falling back to the general search\n", base + 1);
 	}
 
 	// Otherwise (or if even distance 1 was unusable): try later rings of this
@@ -1320,6 +1383,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 
 	struct Seat { int base, ring, dX, dY, enemies; const char* src; PackedCell cell; };
 	Seat best{}; bool haveBest = false;
+	int bestAllyD = INT_MAX, bestEnemyD = INT_MAX;
 
 	// Two sweeps. The first demands room to build; if every slot on the map
 	// fails that (a genuinely cramped map, or terrain we are reading wrongly),
@@ -1419,30 +1483,61 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 				const int crowding = HousesAtBase(tryBase);
 				const int bestCrowding = haveBest ? HousesAtBase(best.base) : 0;
 
-				if (!haveBest
-					|| seat.enemies < best.enemies
-					|| (seat.enemies == best.enemies && crowding < bestCrowding))
+				int allyD = INT_MAX, enemyD = INT_MAX;
+				NearestTeamDistances(candidate.Raw, selfIndex, allyD, enemyD);
+
+				bool better = !haveBest;
+				if (!better && seat.enemies != best.enemies)
+					better = seat.enemies < best.enemies;
+				else if (!better && crowding != bestCrowding)
+					better = crowding < bestCrowding;
+				else if (!better && enemyD != bestEnemyD)
+					better = enemyD > bestEnemyD;
+				else if (!better && allyD != bestAllyD)
+					better = allyD < bestAllyD;
+
+				if (better)
 				{
 					best = seat;
+					bestAllyD = allyD;
+					bestEnemyD = enemyD;
 					haveBest = true;
 				}
 
 				continue;
 			}
 
-			// Overflow ordering: enemies, then crowding, then ring. Crowding
-			// matters because enemy-avoidance alone lets allies stack up on one
-			// base while others sit nearly empty.
+			// Overflow ordering: enemies at the base, then crowding, then team
+			// geography, then ring.
+			//
+			// Geography is the tiebreaker that puts teammates together and
+			// rivals apart: among slots that are otherwise equally good, prefer
+			// the one furthest from the nearest enemy, and then closest to the
+			// nearest ally. It only ever chooses BETWEEN free slots, so it can
+			// never leave a position empty or override a chosen one.
 			const int crowding = HousesAtBase(tryBase);
 			const int bestCrowding = haveBest ? HousesAtBase(best.base) : 0;
 
-			if (!haveBest
-				|| seat.enemies < best.enemies
-				|| (seat.enemies == best.enemies && crowding < bestCrowding)
-				|| (seat.enemies == best.enemies && crowding == bestCrowding
-					&& seat.ring < best.ring))
+			int allyD = INT_MAX, enemyD = INT_MAX;
+			NearestTeamDistances(candidate.Raw, selfIndex, allyD, enemyD);
+
+			bool better = !haveBest;
+			if (!better && seat.enemies != best.enemies)
+				better = seat.enemies < best.enemies;
+			else if (!better && crowding != bestCrowding)
+				better = crowding < bestCrowding;
+			else if (!better && enemyD != bestEnemyD)
+				better = enemyD > bestEnemyD;      // further from rivals
+			else if (!better && allyD != bestAllyD)
+				better = allyD < bestAllyD;        // closer to teammates
+			else if (!better)
+				better = seat.ring < best.ring;
+
+			if (better)
 			{
 				best = seat;
+				bestAllyD = allyD;
+				bestEnemyD = enemyD;
 				haveBest = true;
 			}
 		}
@@ -1478,7 +1573,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		return 0;
 	}
 
-	Claim(target.Raw);
+	Claim(target.Raw, selfIndex);
 	OccupyBase(base_out, selfIndex);
 
 	if (ring == 0 && !bumped && !hadNoStart)
@@ -1507,7 +1602,7 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		// lost the keeper draw could take the disputed position through this
 		// path without being recorded as holding it, leaving the actual winner
 		// to find it "taken" and get displaced to another base entirely.
-		Claim(target.Raw);
+		Claim(target.Raw, selfIndex);
 		OccupyBase(base_out, selfIndex);
 
 		return 0;
