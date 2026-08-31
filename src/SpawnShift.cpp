@@ -1146,6 +1146,10 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 	bool bumped = false;
 	bool found = false;
 
+	// Ring of this house's own base that it lost a keeper draw for, or -1.
+	// The general sweep must not hand it back.
+	int lostDrawFor = -1;
+
 	// An EXPLICIT pick is honoured at its own base: if the offset cell is off
 	// the map, pull it back along the SAME direction until it is usable, rather
 	// than relocating the house to a different base.
@@ -1222,6 +1226,9 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 		// for it goes straight to the shuffle, so which contender keeps it is
 		// decided by the seed rather than by house order.
 		const bool isKeeper = (KeeperForSlot(base, requestedRing) == selfIndex);
+
+		if (!isKeeper)
+			lostDrawFor = requestedRing;
 
 		if (!isKeeper)
 			PlayerCountExt::Log("[shift]   \"%d%s\" drawn by another contender; "
@@ -1346,6 +1353,12 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			}
 
 			if (IsClaimed(candidate.Raw))
+				continue;
+
+			// Losing the draw has to stick. Otherwise a contender rejected from
+			// the disputed slot walks straight back into it here, and the house
+			// that actually won the draw finds it occupied.
+			if (lostDrawFor >= 0 && tryBase == base && tryRing == lostDrawFor)
 				continue;
 
 			if (!CellIsUsable(candidate.Raw))
@@ -1486,6 +1499,16 @@ DEFINE_HOOK(0x5D6D3F, PlayerCountExt_SpawnShift_AfterSetBaseCell, 0x5)
 			PlayerCountExt::Log("[shift] house@0x%08X — WARNING: seated at (%d,%d) which reports "
 				"no room to build; the filter let it through\n",
 				pHouse, target.Cell.X, target.Cell.Y);
+
+		// Claim it. The comment above always said we did; the call was missing.
+		//
+		// Without this the seat is invisible to every later house's collision
+		// check, so two houses can be handed the same cell — and a contender who
+		// lost the keeper draw could take the disputed position through this
+		// path without being recorded as holding it, leaving the actual winner
+		// to find it "taken" and get displaced to another base entirely.
+		Claim(target.Raw);
+		OccupyBase(base_out, selfIndex);
 
 		return 0;
 	}
