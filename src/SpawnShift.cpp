@@ -716,6 +716,69 @@ namespace
 		return v == RoomVerdict::Ok || v == RoomVerdict::NoCellData;
 	}
 
+	// ── Two houses on one start position ────────────────────────────────
+	//
+	// Picking the same slot as someone else used to be refused at the lobby.
+	// It is now allowed: the first house keeps the exact slot and any others
+	// are moved to a free compass variant OF THE SAME BASE, so "we both picked
+	// 4" puts you both around position 4 rather than scattering one of you
+	// across the map.
+	//
+	// Which variant is chosen is randomised, but it MUST be the same randomness
+	// on every machine or clients place the same house differently and the game
+	// desyncs. So it is derived from spawn.ini's Seed - host-authoritative and
+	// broadcast to everyone - mixed with the base and the house's own index.
+	// Same inputs, same answer, everywhere; different game, different layout.
+	//
+	// Deliberately NOT ScenarioClass::Random: consuming from the game's RNG
+	// during setup shifts every later draw, which is a desync of its own if any
+	// other DLL draws a different number of times.
+	unsigned int MixSeed(unsigned int seed, int base, int houseIndex)
+	{
+		// FNV-1a over the three inputs; cheap and well-spread.
+		unsigned int h = 2166136261u;
+		const unsigned int parts[3] =
+		{
+			seed,
+			static_cast<unsigned int>(base),
+			static_cast<unsigned int>(houseIndex)
+		};
+
+		for (int p = 0; p < 3; ++p)
+		{
+			for (int b = 0; b < 4; ++b)
+			{
+				h ^= (parts[p] >> (b * 8)) & 0xFFu;
+				h *= 16777619u;
+			}
+		}
+
+		return h;
+	}
+
+	// Fills `order` with rings 1..RingCount-1 in a seed-dependent order.
+	// Ring 0 is excluded: it is the exact slot, and the caller has already
+	// found it taken.
+	void ShuffledRings(int order[], unsigned int seed, int base, int houseIndex)
+	{
+		const int count = RingCount - 1;
+		for (int i = 0; i < count; ++i)
+			order[i] = i + 1;
+
+		// Fisher-Yates driven by a deterministic LCG, so the permutation is a
+		// pure function of the seed inputs.
+		unsigned int state = MixSeed(seed, base, houseIndex) | 1u;
+		for (int i = count - 1; i > 0; --i)
+		{
+			state = state * 1664525u + 1013904223u;
+			const int j = static_cast<int>((state >> 16) % static_cast<unsigned int>(i + 1));
+
+			const int tmp = order[i];
+			order[i] = order[j];
+			order[j] = tmp;
+		}
+	}
+
 	// Which contender keeps the exact slot when several ask for the same one.
 	//
 	// Previously this was decided by house order, so the first house in
@@ -779,68 +842,6 @@ namespace
 		return -1;
 	}
 
-	// ── Two houses on one start position ────────────────────────────────
-	//
-	// Picking the same slot as someone else used to be refused at the lobby.
-	// It is now allowed: the first house keeps the exact slot and any others
-	// are moved to a free compass variant OF THE SAME BASE, so "we both picked
-	// 4" puts you both around position 4 rather than scattering one of you
-	// across the map.
-	//
-	// Which variant is chosen is randomised, but it MUST be the same randomness
-	// on every machine or clients place the same house differently and the game
-	// desyncs. So it is derived from spawn.ini's Seed - host-authoritative and
-	// broadcast to everyone - mixed with the base and the house's own index.
-	// Same inputs, same answer, everywhere; different game, different layout.
-	//
-	// Deliberately NOT ScenarioClass::Random: consuming from the game's RNG
-	// during setup shifts every later draw, which is a desync of its own if any
-	// other DLL draws a different number of times.
-	unsigned int MixSeed(unsigned int seed, int base, int houseIndex)
-	{
-		// FNV-1a over the three inputs; cheap and well-spread.
-		unsigned int h = 2166136261u;
-		const unsigned int parts[3] =
-		{
-			seed,
-			static_cast<unsigned int>(base),
-			static_cast<unsigned int>(houseIndex)
-		};
-
-		for (int p = 0; p < 3; ++p)
-		{
-			for (int b = 0; b < 4; ++b)
-			{
-				h ^= (parts[p] >> (b * 8)) & 0xFFu;
-				h *= 16777619u;
-			}
-		}
-
-		return h;
-	}
-
-	// Fills `order` with rings 1..RingCount-1 in a seed-dependent order.
-	// Ring 0 is excluded: it is the exact slot, and the caller has already
-	// found it taken.
-	void ShuffledRings(int order[], unsigned int seed, int base, int houseIndex)
-	{
-		const int count = RingCount - 1;
-		for (int i = 0; i < count; ++i)
-			order[i] = i + 1;
-
-		// Fisher-Yates driven by a deterministic LCG, so the permutation is a
-		// pure function of the seed inputs.
-		unsigned int state = MixSeed(seed, base, houseIndex) | 1u;
-		for (int i = count - 1; i > 0; --i)
-		{
-			state = state * 1664525u + 1013904223u;
-			const int j = static_cast<int>((state >> 16) % static_cast<unsigned int>(i + 1));
-
-			const int tmp = order[i];
-			order[i] = order[j];
-			order[j] = tmp;
-		}
-	}
 
 	// Position of a house in HouseClass::Array. This is also its Multi number
 	// minus one, which is what the alliance sections are keyed by.
