@@ -51,6 +51,8 @@
 
 namespace
 {
+	// Shared across every guarded site; these fire per house per check and
+	// would otherwise flood the log.
 	int Reported = 0;
 }
 
@@ -69,31 +71,67 @@ namespace
 // callee would have cleaned that argument, so skipping both keeps the stack
 // balanced.
 // ---------------------------------------------------------------------------
-DEFINE_HOOK(0x4F671D, PlayerCountExt_BaseUnitGuard_NullFromArray, 0x5)
+static void ReportNullBaseUnit(DWORD pHouse, const char* which)
 {
-	GET(DWORD, pBaseUnitType, EAX);
-	if (pBaseUnitType)
+	if (Reported >= 8)
+		return;
+
+	++Reported;
+
+	const char* country = "<unknown>";
+	if (pHouse)
+	{
+		const auto pType = *reinterpret_cast<DWORD const volatile*>(pHouse + 0x34);
+		if (pType)
+			country = reinterpret_cast<const char*>(pType + 0x24);
+	}
+
+	PlayerCountExt::Log("[baseunit] house@0x%08X (country %s) can build nothing from %s; "
+		"continuing instead of crashing\n", pHouse, country, which);
+}
+
+// 0x4F671D — the BaseUnit lookup (Rules + 0x938).
+//
+// EBX = 0 is correct, not merely safe. Both results are costs: 0x4F676E does
+// `add ebx,edi` and compares the sum against the house's money, and EDI already
+// holds the engine's own unavailable sentinel 0x7FFFFFFF (set at 0x4F6706 on
+// the parallel lookup above). Zero makes the sum exactly that sentinel.
+// 0x7FFFFFFF in both would overflow to -2 and invert the comparison.
+DEFINE_HOOK(0x4F671D, PlayerCountExt_BaseUnitGuard_BaseUnit, 0x5)
+{
+	GET(DWORD, pType, EAX);
+	if (pType)
 		return 0;
 
 	GET(DWORD, pHouse, ESI);
-
-	if (Reported < 8)
-	{
-		++Reported;
-
-		const char* country = "<unknown>";
-		if (pHouse)
-		{
-			const auto pType = *reinterpret_cast<DWORD const volatile*>(pHouse + 0x34);
-			if (pType)
-				country = reinterpret_cast<const char*>(pType + 0x24);
-		}
-
-		PlayerCountExt::Log("[baseunit] house@0x%08X (country %s) can build nothing from "
-			"[General]BaseUnit=; treating it as unaffordable instead of crashing "
-			"(Antares leaves this call site unguarded)\n", pHouse, country);
-	}
+	ReportNullBaseUnit(pHouse, "[General]BaseUnit=");
 
 	R->EBX(0u);
 	return 0x4F672A;
+}
+
+// 0x4F6794 — the same shape, on a different Rules list (+0x8E4).
+//
+//     4f6794:  8b 10        mov  edx,[eax]     <- hooked, 5 stolen
+//     4f6796:  56           push esi
+//     4f6797:  8b c8        mov  ecx,eax
+//     4f6799:  call [edx+0x84]
+//     4f679f:  mov  cl,[esp+0x14]
+//
+// This one does not store the call's result anywhere before 0x4F679F, so there
+// is nothing to substitute — skipping past the push and the call is enough, and
+// the callee would have cleaned that argument so the stack stays balanced.
+//
+// Reached only because the guard above lets execution continue; it was hidden
+// behind the earlier crash.
+DEFINE_HOOK(0x4F6794, PlayerCountExt_BaseUnitGuard_SecondList, 0x5)
+{
+	GET(DWORD, pType, EAX);
+	if (pType)
+		return 0;
+
+	GET(DWORD, pHouse, ESI);
+	ReportNullBaseUnit(pHouse, "[General] list at Rules+0x8E4");
+
+	return 0x4F679F;
 }
