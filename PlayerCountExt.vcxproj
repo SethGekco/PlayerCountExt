@@ -80,6 +80,7 @@
     <ClCompile Include="src\AllianceFix.cpp" />
     <ClCompile Include="src\ScoreRecords.cpp" />
     <ClCompile Include="src\SensorArrays.cpp" />
+    <ClCompile Include="src\BaseUnitGuard.cpp" />
     <ClCompile Include="src\AutoAlly.cpp" />
     <ClCompile Include="src\BaseCellTrace.cpp" />
   </ItemGroup>
